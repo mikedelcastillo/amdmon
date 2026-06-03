@@ -53,10 +53,37 @@ powershell -File gpumon.ps1 -Interval 2
 powershell -File gpumon.ps1 -Once
 ```
 
-Tip: add a function to your PowerShell `$PROFILE` so you can just type `gpumon` after you SSH in:
+### Run `amdmon` from anywhere
+
+Install the `amdmon` command once and call it from any directory (handy after you SSH in):
 
 ```powershell
-function gpumon { powershell -ExecutionPolicy Bypass -File "$HOME\Code\amd-mon\gpumon.ps1" @args }
+powershell -ExecutionPolicy Bypass -File install.ps1
+. $PROFILE   # reload the profile (or just open a new PowerShell window)
+```
+
+This adds a small function to your PowerShell `$PROFILE` that runs `gpumon.ps1` **by path**, so:
+
+- it works from any directory, and
+- it always runs your current `gpumon.ps1` — edit the script and the change takes effect on the next run, no re-install needed (unless you move the repo, then just re-run `install.ps1`).
+
+Then use it like the script itself:
+
+```powershell
+amdmon              # live dashboard, Ctrl+C to quit
+amdmon -Interval 2  # custom refresh interval
+amdmon -Once        # single snapshot
+```
+
+Notes:
+
+- PowerShell-only (works in any PowerShell session, including over SSH); not available from `cmd.exe`.
+- Your execution policy must allow local scripts (`RemoteSigned` or `Unrestricted`).
+
+To remove the command later:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
 ### Example output
