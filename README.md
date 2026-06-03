@@ -1,4 +1,4 @@
-# amd-mon
+# amdmon
 
 A tiny, dependency-free PowerShell tool to monitor **AMD (and any) GPU utilization and VRAM from a terminal on Windows** — built specifically to work over **SSH**, where every GUI tool is useless and the popular terminal monitors don't support AMD.
 
@@ -15,7 +15,7 @@ So: a card that's well supported on Linux, in a Windows machine, accessed over a
 
 ## The solution
 
-Windows exposes GPU utilization and VRAM through the **WDDM performance counters** (`GPU Engine`, `GPU Adapter Memory`), which are **vendor-agnostic** and fully readable from a headless terminal via `Get-Counter`. `amd-mon` reads those counters and renders a small live dashboard. To get the true total VRAM, it reads the driver's 64-bit `HardwareInformation.qwMemorySize` value from the registry instead of the overflow-prone WMI field.
+Windows exposes GPU utilization and VRAM through the **WDDM performance counters** (`GPU Engine`, `GPU Adapter Memory`), which are **vendor-agnostic** and fully readable from a headless terminal via `Get-Counter`. `amdmon` reads those counters and renders a small live dashboard. To get the true total VRAM, it reads the driver's 64-bit `HardwareInformation.qwMemorySize` value from the registry instead of the overflow-prone WMI field.
 
 No dependencies. No admin rights. No GUI session. Just PowerShell.
 
@@ -36,8 +36,8 @@ No dependencies. No admin rights. No GUI session. Just PowerShell.
 ## Install
 
 ```powershell
-git clone https://github.com/mikedelcastillo/amd-mon.git
-cd amd-mon
+git clone https://github.com/mikedelcastillo/amdmon.git
+cd amdmon
 ```
 
 ## Usage
