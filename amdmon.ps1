@@ -205,15 +205,18 @@ if (-not $haveLhm) {
 
 # ---- Network throughput counters (bytes/sec, summed across real adapters) ----
 # These rate counters come straight from the Windows perf subsystem - no extra
-# library needed - and work headless over SSH. We sum every physical-looking
-# interface so a machine with multiple NICs reports total up/down.
+# library needed - and work headless over SSH. We sum the real adapters and skip
+# virtual/loopback/tunnel/bridge interfaces by name, so a Hyper-V/WSL vSwitch or
+# a VPN doesn't double-count the traffic already seen on the underlying NIC.
 $script:NetRxCtrs = New-Object System.Collections.Generic.List[object]
 $script:NetTxCtrs = New-Object System.Collections.Generic.List[object]
+# Name fragments of interfaces to exclude from the throughput sum: loopback,
+# tunnels, and the common virtual/bridge/VPN/capture adapters.
+$NetSkip = 'Loopback|isatap|Teredo|Pseudo|Kernel Debug|QoS|Virtual|vEthernet|Hyper-V|VMware|VirtualBox|Npcap|WAN Miniport|Wi-Fi Direct|TAP-|VPN|Bluetooth|Filter|Container|WFP'
 try {
     $netCat = New-Object System.Diagnostics.PerformanceCounterCategory('Network Interface')
     foreach ($inst in $netCat.GetInstanceNames()) {
-        # Skip virtual/loopback/tunnel adapters so idle pseudo-interfaces don't add noise.
-        if ($inst -match 'Loopback|isatap|Teredo|Pseudo|Kernel Debug|QoS') { continue }
+        if ($inst -match $NetSkip) { continue }
         try {
             $rx = New-Object System.Diagnostics.PerformanceCounter('Network Interface','Bytes Received/sec',$inst)
             $tx = New-Object System.Diagnostics.PerformanceCounter('Network Interface','Bytes Sent/sec',$inst)
@@ -224,11 +227,13 @@ try {
 } catch { }
 $haveNet = ($script:NetRxCtrs.Count -gt 0)
 
-# Friendly name for the busiest/primary up adapter (best effort).
+# Friendly name for the busiest/primary up adapter (best effort). Sort on the
+# numeric .Speed (bits/sec); the LinkSpeed property is a formatted string and
+# would sort lexicographically (e.g. '480 Mbps' above '10 Gbps').
 $netName = $null
 try {
     $netName = (Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
-        Where-Object { $_.Status -eq 'Up' } | Sort-Object -Property LinkSpeed -Descending |
+        Where-Object { $_.Status -eq 'Up' } | Sort-Object -Property Speed -Descending |
         Select-Object -First 1).InterfaceDescription
 } catch { }
 if (-not $netName) { $netName = 'Network' }
@@ -314,8 +319,8 @@ if ($Once) {
     Write-Host ("GPU   {0,-30} {1,7}   {2}" -f $gpuName, (Format-Pct $f.Gpu), (Format-Temp $f.GpuT)) -ForegroundColor Green
     Write-Host ("MEM   {0,-30} {1,7}   {2:N1} / {3:N0} GB" -f $ramName, (Format-Pct $f.MemPct), $f.MemUsedGB, $f.MemTotalGB) -ForegroundColor Yellow
     Write-Host ("VRAM  {0,-30} {1,7}   {2:N1} / {3:N0} GB" -f 'Video Memory', (Format-Pct $f.VramPct), $f.VramUsedGB, $f.VramTotalGB) -ForegroundColor Magenta
-    Write-Host ("NET   {0,-30} {1,12}   down" -f $netName, (Format-Rate $f.NetDown)) -ForegroundColor Cyan
-    Write-Host ("NET   {0,-30} {1,12}   up" -f $netName, (Format-Rate $f.NetUp)) -ForegroundColor Blue
+    Write-Host ("DOWN  {0,-30} {1,11}" -f $netName, (Format-Rate $f.NetDown)) -ForegroundColor Cyan
+    Write-Host ("UP    {0,-30} {1,11}" -f $netName, (Format-Rate $f.NetUp))   -ForegroundColor Blue
     return
 }
 
@@ -330,7 +335,7 @@ $blocks = @(' ',[char]0x2581,[char]0x2582,[char]0x2583,[char]0x2584,[char]0x2585
 $DEG = [char]0x00B0
 
 function Fg($r,$g,$b) { "$E[38;2;$r;$g;${b}m" }
-function FgRGB($c) { "$E[38;2;$($c[0]);$($c[1]);$($c[2])m" }
+function FgRGB($c) { Fg $c[0] $c[1] $c[2] }
 
 # Scale an RGB triple toward black (k<1) or white-ish (k>1, clamped). Used to
 # derive a dim structural shade and a bright highlight from one accent colour.
@@ -378,8 +383,8 @@ $Metrics = @(
     @{ Key='VRAM';    Label='VRAM';     RGB=@(175,130,235); Ramp=$RampLoad;    Min=0;  Max=100 }
     @{ Key='CPUTEMP'; Label='CPU TEMP'; RGB=@(235,160,70);  Ramp=$RampThermal; Min=20; Max=100 }
     @{ Key='GPUTEMP'; Label='GPU TEMP'; RGB=@(232,110,90);  Ramp=$RampThermal; Min=20; Max=100 }
-    @{ Key='NETDOWN'; Label='NET DOWN'; RGB=@(70,200,190);  Ramp=$RampNetDown; Min=0;  Max=100; Dynamic=$true; Floor=131072 }
-    @{ Key='NETUP';   Label='NET UP';   RGB=@(238,180,90);  Ramp=$RampNetUp;   Min=0;  Max=100; Dynamic=$true; Floor=131072 }
+    @{ Key='NETDOWN'; Label='NET DOWN'; RGB=@(70,200,190);  Ramp=$RampNetDown; Min=0;  Max=100; Dynamic=$true; Floor=128KB }
+    @{ Key='NETUP';   Label='NET UP';   RGB=@(238,180,90);  Ramp=$RampNetUp;   Min=0;  Max=100; Dynamic=$true; Floor=128KB }
 )
 # Derive each panel's bright accent (title text), a dim structural shade (box
 # border, so frames recede behind the data), and its history buffer.
@@ -417,7 +422,7 @@ function Build-TitleBar([int]$w, [string]$left, [string]$right) {
 }
 
 # Render one panel to an array of $h ANSI strings, each $w cells wide.
-function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value, [double]$cur) {
+function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value) {
     $accent = $metric.Accent        # bright: title label
     $dim    = $metric.AccentDim     # dim: box frame, so the data reads above it
     $tl=[char]0x256D; $tr=[char]0x256E; $bl=[char]0x2570; $br=[char]0x256F; $vb=[char]0x2502
@@ -427,25 +432,30 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
     $wi = $w - 2
     $left = "$($metric.Label)"
     if ($detail) { $left = "$($metric.Label)  $detail" }
-    # Trim the detail if the title would overflow.
-    $maxLeft = $wi - (" $value ".Length) - 4
-    if ($maxLeft -gt 4 -and $left.Length -gt $maxLeft) { $left = $left.Substring(0, $maxLeft - 1) + [char]0x2026 }
+    # Trim the detail so the title ALWAYS fits before the value and never overlaps
+    # it - an overlap would make the label splice (below) cut through the value's
+    # injected ANSI escapes, leaking raw escape bytes and breaking the width.
+    $valPad  = " $value "
+    $maxLeft = $wi - $valPad.Length - 4
+    if ($maxLeft -lt 1) { $maxLeft = 1 }
+    if ($left.Length -gt $maxLeft) { $left = $left.Substring(0, [math]::Max(1, $maxLeft - 1)) + [char]0x2026 }
 
     # --- top border with title; frame dim, label bright accent, value bright white ---
     $bar = Build-TitleBar $wi $left $value
+    # Plain index where the value span begins (or bar end if no value). Both
+    # overlays stay strictly left of this so neither reads the other's escapes.
+    $valStart = if ($value) { $wi - $valPad.Length - 1 } else { $wi }
     # Overlay value (right side) first so the later left-side label splice keeps
     # its character indices valid.
-    if ($value) {
-        $R = " $value "
-        $vs = $wi - $R.Length - 1
-        if ($vs -ge 0 -and ($vs + $R.Length) -le $bar.Length) {
-            $bar = $bar.Substring(0,$vs) + "$RESET$BOLD" + (Fg 245 245 245) + $bar.Substring($vs,$R.Length) + $RESET + $dim + $bar.Substring($vs + $R.Length)
-        }
+    if ($value -and $valStart -ge 0 -and ($valStart + $valPad.Length) -le $bar.Length) {
+        $bar = $bar.Substring(0,$valStart) + "$RESET$BOLD" + (Fg 245 245 245) + $bar.Substring($valStart,$valPad.Length) + $RESET + $dim + $bar.Substring($valStart + $valPad.Length)
     }
-    # Overlay the title label span (sits at index 1) in the bright accent.
+    # Overlay the title label span (sits at index 1) in the bright accent, clamped
+    # so it can never reach into the value span's injected escapes.
     $Lstr = " $left "
-    if ($Lstr.Length -gt 0 -and (1 + $Lstr.Length) -le $bar.Length) {
-        $bar = $bar.Substring(0,1) + $accent + $bar.Substring(1, $Lstr.Length) + $dim + $bar.Substring(1 + $Lstr.Length)
+    $lLen = [math]::Min($Lstr.Length, [math]::Max(0, $valStart - 1))
+    if ($lLen -gt 0 -and (1 + $lLen) -le $bar.Length) {
+        $bar = $bar.Substring(0,1) + $accent + $bar.Substring(1, $lLen) + $dim + $bar.Substring(1 + $lLen)
     }
     $lines.Add("$dim$tl$bar$tr$RESET")
 
@@ -468,7 +478,7 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
                 $val = $hist[$k]
                 if (-not [double]::IsNaN($val) -and $val -gt $peak) { $peak = $val }
             }
-            $floor = if ($metric.Floor) { [double]$metric.Floor } else { 1 }
+            $floor = if ($null -ne $metric.Floor) { [double]$metric.Floor } else { 1 }
             if ($peak -lt $floor) { $peak = $floor }
             $scaleMax = $peak * 1.15   # a little headroom above the peak
         }
@@ -559,9 +569,11 @@ public static void Enable() {
 # Build the full frame (rows + status bar) as one string, no leading cursor move.
 function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
     $gridH = $H - 1
-    # Four equal-ish bands (CPU/temp, GPU/temp, MEM/VRAM, NET down/up); any
-    # leftover rows are handed to the bottom bands so nothing is dropped.
-    $bands = 4
+    # One band per metric pair, derived from $Metrics so adding/removing metrics
+    # reflows automatically. Layout is left|right per band, top to bottom:
+    # CPU|MEM, GPU|VRAM, CPU TEMP|GPU TEMP, NET DOWN|NET UP. Any leftover rows are
+    # handed to the bottom bands so nothing is dropped.
+    $bands = [int][math]::Ceiling($Metrics.Count / 2.0)
     $base = [int][math]::Floor($gridH / $bands)   # floor: [int] alone rounds, breaking the remainder math
     $rem  = $gridH - ($base * $bands)
     $bandH = @()
@@ -592,9 +604,15 @@ function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
     for ($band = 0; $band -lt $bands; $band++) {
         $bh = $bandH[$band]
         $mL = $Metrics[$band * 2]
-        $mR = $Metrics[$band * 2 + 1]
-        $pL = Render-Panel $mL $wL $bh $details[$mL.Key] $values[$mL.Key] 0
-        $pR = Render-Panel $mR $wR $bh $details[$mR.Key] $values[$mR.Key] 0
+        $mR = if (($band * 2 + 1) -lt $Metrics.Count) { $Metrics[$band * 2 + 1] } else { $null }
+        $pL = Render-Panel $mL $wL $bh $details[$mL.Key] $values[$mL.Key]
+        if ($mR) {
+            $pR = Render-Panel $mR $wR $bh $details[$mR.Key] $values[$mR.Key]
+        } else {
+            # Odd metric count: pad the right half with an empty spacer column.
+            $pR = New-Object System.Collections.Generic.List[string]
+            for ($i = 0; $i -lt $bh; $i++) { $pR.Add(' ' * $wR) }
+        }
         for ($i = 0; $i -lt $bh; $i++) { $rows.Add($pL[$i] + $pR[$i]) }
     }
 
@@ -657,7 +675,10 @@ if ($SelfTest) {
 # ----------------------------------------------------------------------------
 # Main loop.
 # ----------------------------------------------------------------------------
-$MinW = 56; $MinH = 20
+# MinH derives from the band count (~5 rows per band + 1 status row) so it stays
+# coherent if metrics are added/removed; MinW is a fixed legibility floor.
+$MinW = 56
+$MinH = ([int][math]::Ceiling($Metrics.Count / 2.0)) * 5 + 1
 $targetMs = [int]([math]::Max(16, $Interval * 1000))
 
 Enable-VT
@@ -695,4 +716,9 @@ try {
     try { [Console]::CursorVisible = $prevCursor } catch { }
     [Console]::Out.Write("$E[2J$E[H")
     if ($script:Computer) { try { $script:Computer.Close() } catch { } }
+    # Release the unmanaged PDH handles held by the performance counters.
+    foreach ($c in $script:NetRxCtrs) { try { $c.Dispose() } catch { } }
+    foreach ($c in $script:NetTxCtrs) { try { $c.Dispose() } catch { } }
+    if ($memAvail) { try { $memAvail.Dispose() } catch { } }
+    if ($cpuCtr)   { try { $cpuCtr.Dispose() } catch { } }
 }

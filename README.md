@@ -129,7 +129,7 @@ The live dashboard shows the same data as eight bordered panels, each with a scr
 
 - **Usage, temps, VRAM** come from `LibreHardwareMonitorLib` (CPU `CPU Total` load, `Core (Tctl/Tdie)` temp; GPU `GPU Core` load + temp; `GPU Memory Used/Total`).
 - **System RAM** uses the `Memory\Available Bytes` performance counter plus total physical memory from WMI — this avoids pulling in LibreHardwareMonitor's extra SPD dependency.
-- **Network down/up** come from the built-in `Network Interface\Bytes Received/sec` and `Bytes Sent/sec` performance counters, summed across all physical adapters (loopback/tunnel/virtual interfaces are filtered out). This is a native Windows data source, so the feature adds **no new dependency** — nothing extra to download or install.
+- **Network down/up** come from the built-in `Network Interface\Bytes Received/sec` and `Bytes Sent/sec` performance counters, summed across the real adapters. Loopback, tunnel, and common virtual/bridge/VPN adapters (Hyper-V vEthernet, WSL, VMware, VirtualBox, TAP/VPN, Wi-Fi Direct, etc.) are skipped by name so a virtual switch or VPN doesn't double-count the traffic already seen on the underlying NIC. This is a native Windows data source, so the feature adds **no new dependency** — nothing extra to download or install.
 - The library DLLs are fetched from NuGet on first run and cached in `.\lib` (git-ignored). Version mismatches between the library and Windows PowerShell's .NET Framework are bridged with an `AssemblyResolve` handler.
 
 ## Notes & limitations
