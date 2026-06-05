@@ -1,37 +1,52 @@
 # amdmon
 
-A tiny, dependency-free PowerShell tool to monitor **AMD (and any) GPU utilization and VRAM from a terminal on Windows** — built specifically to work over **SSH**, where every GUI tool is useless and the popular terminal monitors don't support AMD.
+A **btop-style, full-screen system monitor for Windows terminals** — CPU, RAM, GPU and VRAM usage plus **CPU & GPU temperatures**, each with a scrolling history graph (MSI Afterburner / RivaTuner style). Built specifically to work over **SSH**, where every GUI tool is useless and the popular terminal monitors don't support AMD.
+
+![amdmon](https://img.shields.io/badge/platform-Windows-blue) ![shell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 
 ## The problem
 
-I have a **Radeon RX 7900 XT (20 GB)** in a Windows 11 box that I manage headless over SSH, and there was no good way to watch GPU/VRAM usage:
+I have a **Radeon RX 7900 XT (20 GB)** in a Windows 11 box that I manage headless over SSH, and there was no good way to watch GPU/VRAM/temps:
 
-- **`bottom` (`btm`) and `btop`** only read AMD GPUs on **Linux** (via `/sys/class/drm`). On Windows they support **NVIDIA only**, so the 7900 XT never shows up — and there's no setting that fixes it.
+- **`bottom` (`btm`) and `btop`** only read AMD GPUs on **Linux** (via `/sys/class/drm`). On Windows they support **NVIDIA only**, so the 7900 XT never shows up.
 - **Task Manager, AMD Software: Adrenalin, HWiNFO, GPU-Z, MSI Afterburner** all need an interactive desktop session. Over SSH there's no desktop, so they're out.
 - **`rocm-smi` / `nvtop`** are Linux tools.
 - `Win32_VideoController.AdapterRAM` (the usual WMI query) **overflows for cards >4 GB**, reporting the 20 GB card as only ~4 GB.
+- **Temperatures aren't in the Windows performance counters at all** — on Ryzen they need a kernel-level driver to read.
 
 So: a card that's well supported on Linux, in a Windows machine, accessed over a terminal, had effectively zero monitoring options.
 
 ## The solution
 
-Windows exposes GPU utilization and VRAM through the **WDDM performance counters** (`GPU Engine`, `GPU Adapter Memory`), which are **vendor-agnostic** and fully readable from a headless terminal via `Get-Counter`. `amdmon` reads those counters and renders a small live dashboard. To get the true total VRAM, it reads the driver's 64-bit `HardwareInformation.qwMemorySize` value from the registry instead of the overflow-prone WMI field.
+`amdmon` renders a full-screen dashboard with a 2×3 grid of panels, each showing a live value and a scrolling history graph:
 
-No dependencies. No admin rights. No GUI session. Just PowerShell.
+```
+CPU usage   │ CPU temperature
+GPU usage   │ GPU temperature
+RAM usage   │ VRAM usage
+```
+
+Data comes from **[LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor)** (the open-source library behind many Windows monitors), which reads CPU/GPU load, temperatures, and VRAM directly — including Ryzen CPU temps and AMD GPU temps that no standard Windows API exposes. The library is **downloaded automatically to `.\lib` on first run**; you don't check it in or install anything by hand. If it can't be loaded, `amdmon` falls back to Windows performance counters for usage and shows temperatures as `n/a`.
+
+The rendering uses ANSI true-color and redraws in place, so it **fills the whole terminal and never flashes**, even at a 100 ms refresh.
 
 ## Features
 
-- GPU utilization — overall plus a per-engine breakdown (3D, compute, copy, video, …)
-- Dedicated VRAM used / total / percent — correct on cards >4 GB
-- Shared memory usage
-- Live refreshing dashboard, or a single snapshot for logging/scripting
+- **Full-screen TUI** that uses the entire terminal width and height, with a warning when the window is too small
+- **CPU / RAM / GPU / VRAM usage** and **CPU / GPU temperatures**, each with a scrolling **history graph** and a green→yellow→red gradient
+- **Component names** shown inline — CPU model, GPU model, and RAM size/type/speed
+- **~100 ms refresh**, flicker-free (in-place ANSI redraw)
+- Correct VRAM total on cards >4 GB
+- Single-snapshot mode (`-Once`) for logging/scripting
 - Works over SSH on Windows for AMD, NVIDIA, and Intel GPUs
 
 ## Requirements
 
 - Windows 10/11
 - PowerShell 5.1+ or PowerShell 7+
-- A GPU with an up-to-date WDDM driver (any vendor)
+- A terminal that supports ANSI true-color (Windows Terminal, recent conhost, most SSH clients)
+- **Administrator** for temperatures — they load a signed kernel driver. Without admin, usage still works and temps show `n/a`.
+- Internet access on first run (to download the monitoring library, ~1.5 MB, from NuGet)
 
 ## Install
 
@@ -42,15 +57,23 @@ cd amdmon
 
 ## Usage
 
+Run as **Administrator** to get temperatures:
+
 ```powershell
-# Live refreshing dashboard (1s refresh), Ctrl+C to quit
-powershell -ExecutionPolicy Bypass -File gpumon.ps1
+# Full-screen dashboard, ~100 ms refresh. Press q or Ctrl+C to quit.
+powershell -ExecutionPolicy Bypass -File amdmon.ps1
 
-# Custom refresh interval (seconds)
-powershell -File gpumon.ps1 -Interval 2
+# Slower refresh (seconds)
+powershell -File amdmon.ps1 -Interval 1
 
-# Single snapshot (good for logging / scripting)
-powershell -File gpumon.ps1 -Once
+# Single text snapshot (good for logging / scripting)
+powershell -File amdmon.ps1 -Once
+
+# Skip the temperature library entirely (usage only, via perf counters)
+powershell -File amdmon.ps1 -NoTemp
+
+# Just pre-download the libraries and exit
+powershell -File amdmon.ps1 -EnsureDeps
 ```
 
 ### Run `amdmon` from anywhere
@@ -62,16 +85,16 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 . $PROFILE   # reload the profile (or just open a new PowerShell window)
 ```
 
-This adds a small function to your PowerShell `$PROFILE` that runs `gpumon.ps1` **by path**, so:
+This pre-downloads the libraries and adds a small function to your PowerShell `$PROFILE` that runs `amdmon.ps1` **by path**, so:
 
 - it works from any directory, and
-- it always runs your current `gpumon.ps1` — edit the script and the change takes effect on the next run, no re-install needed (unless you move the repo, then just re-run `install.ps1`).
+- it always runs your current `amdmon.ps1` — edit the script and the change takes effect on the next run, no re-install needed (unless you move the repo, then just re-run `install.ps1`).
 
 Then use it like the script itself:
 
 ```powershell
-amdmon              # live dashboard, Ctrl+C to quit
-amdmon -Interval 2  # custom refresh interval
+amdmon              # full-screen dashboard, q to quit
+amdmon -Interval 1  # custom refresh interval
 amdmon -Once        # single snapshot
 ```
 
@@ -86,22 +109,29 @@ To remove the command later:
 powershell -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
-### Example output
+### Example output (`-Once`)
 
 ```
-AMD GPU Monitor - 22:05:11   (Ctrl+C to quit)
-------------------------------------------------------------
-GPU Busy   [------------------------------]   0.0%
-VRAM Used  [##############################]  99.5%   19.88 / 19.98 GB
-Shared Mem 1.25 GB
-Engines    copy=0%  timer=0%  compute=0%  security=0%  3d=0%  video=0%
+CPU   AMD Ryzen 7 3700X 8-Core Processor    6.2%   53°C
+GPU   AMD Radeon RX 7900 XT                 0.0%   41°C
+MEM   64 GB DDR4-2667 (4x)                  9.9%   6.3 / 64 GB
+VRAM  Video Memory                         21.4%   4.3 / 20 GB
 ```
+
+The live dashboard shows the same data as six bordered panels, each with a scrolling history graph filling the screen.
+
+## How it works
+
+- **Usage, temps, VRAM** come from `LibreHardwareMonitorLib` (CPU `CPU Total` load, `Core (Tctl/Tdie)` temp; GPU `GPU Core` load + temp; `GPU Memory Used/Total`).
+- **System RAM** uses the `Memory\Available Bytes` performance counter plus total physical memory from WMI — this avoids pulling in LibreHardwareMonitor's extra SPD dependency.
+- The library DLLs are fetched from NuGet on first run and cached in `.\lib` (git-ignored). Version mismatches between the library and Windows PowerShell's .NET Framework are bridged with an `AssemblyResolve` handler.
 
 ## Notes & limitations
 
-- **Temperature, power, and clock speeds are not exposed** by the Windows WDDM counters. Those live in AMD's ADL/ADLX libraries and would need a compiled helper — out of scope for this pure-PowerShell tool.
-- The **GPU Busy** figure sums all engine instances, so under heavy mixed load it can read higher than Task Manager (which shows only the single busiest engine). Use the per-engine line for the real split.
-- Tested on Windows 11 with a Radeon RX 7900 XT (20 GB).
+- **Temperatures need Administrator.** LibreHardwareMonitor loads a signed kernel driver to read Ryzen/AMD sensors. Run the shell elevated, or accept `n/a` temps.
+- If the library can't be downloaded or loaded, `amdmon` still runs: usage via WDDM performance counters, temperatures as `n/a`.
+- The terminal must support ANSI true-color for the colored graphs to render correctly.
+- Tested on Windows 11 with a Radeon RX 7900 XT (20 GB) and a Ryzen 7 3700X.
 
 ## License
 

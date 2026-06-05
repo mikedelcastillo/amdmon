@@ -4,7 +4,7 @@
   Strips the `function amdmon` line that install.ps1 added to your $PROFILE.
   Leaves the profile file (and any unrelated content) in place. Idempotent:
   running it when nothing is installed simply reports that. Does not touch
-  gpumon.ps1 or anything else.
+  amdmon.ps1, the downloaded lib\ folder, or anything else.
 
   Usage:  powershell -ExecutionPolicy Bypass -File uninstall.ps1
 #>

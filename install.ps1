@@ -1,10 +1,13 @@
 <#
   install.ps1 - Register the `amdmon` command in your PowerShell profile.
 
-  Adds a function to your $PROFILE that runs gpumon.ps1 (in this folder) by path,
+  Adds a function to your $PROFILE that runs amdmon.ps1 (in this folder) by path,
   so you can type `amdmon` from any directory. Because it points at the live file,
-  edits to gpumon.ps1 take effect immediately - no re-install needed unless the
+  edits to amdmon.ps1 take effect immediately - no re-install needed unless the
   repo moves. Re-running this script just updates/repairs the entry (idempotent).
+
+  It also pre-downloads the hardware-monitoring libraries (LibreHardwareMonitor)
+  so the first `amdmon` run doesn't have to.
 
   Usage:  powershell -ExecutionPolicy Bypass -File install.ps1
 #>
@@ -13,12 +16,20 @@ $ErrorActionPreference = 'Stop'
 
 # Live script path, resolved from this installer's own location so it works
 # regardless of where the repo is cloned.
-$target = Join-Path $PSScriptRoot 'gpumon.ps1'
+$target = Join-Path $PSScriptRoot 'amdmon.ps1'
 if (-not (Test-Path -LiteralPath $target)) {
-    Write-Error "Cannot find gpumon.ps1 next to this installer (looked for: $target)."
+    Write-Error "Cannot find amdmon.ps1 next to this installer (looked for: $target)."
     return
 }
 $target = (Resolve-Path -LiteralPath $target).Path
+
+# Pre-fetch the monitoring libraries (best effort; amdmon downloads them on
+# demand too, so a failure here is not fatal).
+try {
+    & $target -EnsureDeps
+} catch {
+    Write-Host "Note: could not pre-download libraries now ($($_.Exception.Message)); amdmon will retry on first run." -ForegroundColor Yellow
+}
 
 # The function line we manage. A leading marker comment isn't needed - we match
 # on `function amdmon` so we can find/replace our own entry.

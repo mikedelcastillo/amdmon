@@ -5,3 +5,9 @@ desktop.ini
 # Editor
 .vscode/
 *.swp
+
+# Claude Code session data
+.claude/
+
+# Auto-downloaded hardware-monitoring libraries (fetched on first run)
+lib/
