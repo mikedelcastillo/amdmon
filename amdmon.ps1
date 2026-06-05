@@ -1,14 +1,16 @@
 <#
   amdmon.ps1 - A btop-style, full-screen system monitor for Windows terminals.
 
-  Shows CPU / RAM / GPU / VRAM usage plus CPU & GPU temperatures, each with a
-  scrolling history graph (MSI Afterburner / RivaTuner style). Built to work
-  headless over SSH, where GUI tools and btop/bottom can't read AMD GPUs.
+  Shows CPU / RAM / GPU / VRAM usage, CPU & GPU temperatures, and network
+  down/up throughput, each with a scrolling history graph (MSI Afterburner /
+  RivaTuner style). Built to work headless over SSH, where GUI tools and
+  btop/bottom can't read AMD GPUs.
 
-  Data comes from LibreHardwareMonitorLib (auto-downloaded to .\lib on first
-  run; needs admin for CPU/GPU temperatures, which load a signed kernel driver).
-  If the library can't be loaded, it falls back to Windows performance counters
-  for usage and shows temperatures as "n/a".
+  Usage/temps/VRAM come from LibreHardwareMonitorLib (auto-downloaded to .\lib
+  on first run; needs admin for CPU/GPU temperatures, which load a signed kernel
+  driver). If the library can't be loaded, it falls back to Windows performance
+  counters for usage and shows temperatures as "n/a". Network throughput comes
+  from the built-in Network Interface performance counters (no extra dependency).
 
   Usage:   amdmon                 # full-screen dashboard, ~100ms refresh (q or Ctrl+C to quit)
            amdmon -Interval 1     # slower refresh (seconds)
@@ -201,6 +203,36 @@ if (-not $haveLhm) {
     try { $cpuCtr = New-Object System.Diagnostics.PerformanceCounter('Processor','% Processor Time','_Total'); [void]$cpuCtr.NextValue() } catch { }
 }
 
+# ---- Network throughput counters (bytes/sec, summed across real adapters) ----
+# These rate counters come straight from the Windows perf subsystem - no extra
+# library needed - and work headless over SSH. We sum every physical-looking
+# interface so a machine with multiple NICs reports total up/down.
+$script:NetRxCtrs = New-Object System.Collections.Generic.List[object]
+$script:NetTxCtrs = New-Object System.Collections.Generic.List[object]
+try {
+    $netCat = New-Object System.Diagnostics.PerformanceCounterCategory('Network Interface')
+    foreach ($inst in $netCat.GetInstanceNames()) {
+        # Skip virtual/loopback/tunnel adapters so idle pseudo-interfaces don't add noise.
+        if ($inst -match 'Loopback|isatap|Teredo|Pseudo|Kernel Debug|QoS') { continue }
+        try {
+            $rx = New-Object System.Diagnostics.PerformanceCounter('Network Interface','Bytes Received/sec',$inst)
+            $tx = New-Object System.Diagnostics.PerformanceCounter('Network Interface','Bytes Sent/sec',$inst)
+            [void]$rx.NextValue(); [void]$tx.NextValue()   # prime (first read is always 0)
+            $script:NetRxCtrs.Add($rx); $script:NetTxCtrs.Add($tx)
+        } catch { }
+    }
+} catch { }
+$haveNet = ($script:NetRxCtrs.Count -gt 0)
+
+# Friendly name for the busiest/primary up adapter (best effort).
+$netName = $null
+try {
+    $netName = (Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+        Where-Object { $_.Status -eq 'Up' } | Sort-Object -Property LinkSpeed -Descending |
+        Select-Object -First 1).InterfaceDescription
+} catch { }
+if (-not $netName) { $netName = 'Network' }
+
 $cpuTempLabel = if ($script:S.CpuTemp) { $script:S.CpuTemp.Name } else { 'Temperature' }
 $gpuTempLabel = if ($script:S.GpuTemp) { $script:S.GpuTemp.Name } else { 'Temperature' }
 
@@ -237,6 +269,14 @@ function Get-Frame {
     $ramUsedB = $totalRam
     if ($memAvail) { $ramUsedB = $totalRam - [double]$memAvail.NextValue() }
 
+    # Network: sum the per-adapter rate counters (bytes/sec). null when unavailable.
+    $netRx = $null; $netTx = $null
+    if ($haveNet) {
+        $netRx = 0.0; $netTx = 0.0
+        foreach ($c in $script:NetRxCtrs) { try { $netRx += [double]$c.NextValue() } catch { } }
+        foreach ($c in $script:NetTxCtrs) { try { $netTx += [double]$c.NextValue() } catch { } }
+    }
+
     [pscustomobject]@{
         Cpu        = $cpu
         CpuT       = $cpuT
@@ -248,6 +288,8 @@ function Get-Frame {
         VramPct    = if ($vramTotalB -gt 0) { 100.0 * $vramUsedB / $vramTotalB } else { 0 }
         VramUsedGB = $vramUsedB / 1GB
         VramTotalGB= $vramTotalB / 1GB
+        NetDown    = $netRx          # bytes/sec, or $null
+        NetUp      = $netTx          # bytes/sec, or $null
     }
 }
 
@@ -257,12 +299,23 @@ function Get-Frame {
 function Format-Pct($v) { if ($v -eq $null) { 'n/a' } else { '{0:N1}%' -f $v } }
 function Format-Temp($v) { if ($v -eq $null) { 'n/a' } else { '{0:N0}' -f $v + [char]0x00B0 + 'C' } }
 
+# Human-readable transfer rate from bytes/sec (e.g. 1.2 MB/s). $null -> n/a.
+function Format-Rate($bps) {
+    if ($bps -eq $null) { return 'n/a' }
+    if ($bps -lt 1KB)   { return ('{0:N0} B/s'  -f $bps) }
+    if ($bps -lt 1MB)   { return ('{0:N1} KB/s' -f ($bps / 1KB)) }
+    if ($bps -lt 1GB)   { return ('{0:N1} MB/s' -f ($bps / 1MB)) }
+    return ('{0:N2} GB/s' -f ($bps / 1GB))
+}
+
 if ($Once) {
     $f = Get-Frame
     Write-Host ("CPU   {0,-30} {1,7}   {2}" -f $cpuName, (Format-Pct $f.Cpu), (Format-Temp $f.CpuT)) -ForegroundColor Cyan
     Write-Host ("GPU   {0,-30} {1,7}   {2}" -f $gpuName, (Format-Pct $f.Gpu), (Format-Temp $f.GpuT)) -ForegroundColor Green
     Write-Host ("MEM   {0,-30} {1,7}   {2:N1} / {3:N0} GB" -f $ramName, (Format-Pct $f.MemPct), $f.MemUsedGB, $f.MemTotalGB) -ForegroundColor Yellow
     Write-Host ("VRAM  {0,-30} {1,7}   {2:N1} / {3:N0} GB" -f 'Video Memory', (Format-Pct $f.VramPct), $f.VramUsedGB, $f.VramTotalGB) -ForegroundColor Magenta
+    Write-Host ("NET   {0,-30} {1,12}   down" -f $netName, (Format-Rate $f.NetDown)) -ForegroundColor Cyan
+    Write-Host ("NET   {0,-30} {1,12}   up" -f $netName, (Format-Rate $f.NetUp)) -ForegroundColor Blue
     return
 }
 
@@ -295,20 +348,28 @@ function Grad-Fg([double]$f) {
     return (Fg $r $g $b)
 }
 
-# Metric layout: order maps to grid (row0: 0,1  row1: 2,3  row2: 4,5).
+# Metric layout: order maps to grid (left,right per band, top to bottom):
+#   row0: CPU      | MEM
+#   row1: GPU      | VRAM
+#   row2: CPU TEMP | GPU TEMP
+#   row3: NET DOWN | NET UP
+# Dynamic metrics (network) auto-scale the graph to their recent peak instead of
+# using a fixed 0..Max range, since throughput has no natural ceiling.
 $Metrics = @(
     @{ Key='CPU';     Label='CPU';      Accent=(Fg 0 200 255);   Min=0;  Max=100 }
-    @{ Key='CPUTEMP'; Label='CPU TEMP'; Accent=(Fg 255 150 40);  Min=20; Max=100 }
-    @{ Key='GPU';     Label='GPU';      Accent=(Fg 90 220 120);  Min=0;  Max=100 }
-    @{ Key='GPUTEMP'; Label='GPU TEMP'; Accent=(Fg 255 90 60);   Min=20; Max=100 }
     @{ Key='MEM';     Label='MEM';      Accent=(Fg 100 150 255); Min=0;  Max=100 }
+    @{ Key='GPU';     Label='GPU';      Accent=(Fg 90 220 120);  Min=0;  Max=100 }
     @{ Key='VRAM';    Label='VRAM';     Accent=(Fg 185 120 255); Min=0;  Max=100 }
+    @{ Key='CPUTEMP'; Label='CPU TEMP'; Accent=(Fg 255 150 40);  Min=20; Max=100 }
+    @{ Key='GPUTEMP'; Label='GPU TEMP'; Accent=(Fg 255 90 60);   Min=20; Max=100 }
+    @{ Key='NETDOWN'; Label='NET DOWN'; Accent=(Fg 80 220 200);  Min=0;  Max=100; Dynamic=$true; Floor=131072 }
+    @{ Key='NETUP';   Label='NET UP';   Accent=(Fg 250 180 80);  Min=0;  Max=100; Dynamic=$true; Floor=131072 }
 )
 $Hist = @{}
 foreach ($m in $Metrics) { $Hist[$m.Key] = New-Object System.Collections.ArrayList }
 
 function Add-History($f) {
-    $vals = @{ CPU=$f.Cpu; CPUTEMP=$f.CpuT; GPU=$f.Gpu; GPUTEMP=$f.GpuT; MEM=$f.MemPct; VRAM=$f.VramPct }
+    $vals = @{ CPU=$f.Cpu; CPUTEMP=$f.CpuT; GPU=$f.Gpu; GPUTEMP=$f.GpuT; MEM=$f.MemPct; VRAM=$f.VramPct; NETDOWN=$f.NetDown; NETUP=$f.NetUp }
     foreach ($m in $Metrics) {
         $v = $vals[$m.Key]
         if ($v -eq $null) { $v = [double]::NaN }
@@ -366,13 +427,28 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
         $hist = $Hist[$metric.Key]
         $n = $hist.Count
         $lvl = New-Object 'int[]' $wi     # -1 = no data, else 0..hi*8
-        $span = [double]($metric.Max - $metric.Min); if ($span -le 0) { $span = 1 }
+        $scaleMin = [double]$metric.Min
+        $scaleMax = [double]$metric.Max
+        if ($metric.Dynamic) {
+            # Auto-scale to the visible window's peak, with a floor so an idle
+            # link doesn't amplify a few bytes of noise to full height.
+            $peak = 0.0
+            $vstart = [math]::Max(0, $n - $wi)
+            for ($k = $vstart; $k -lt $n; $k++) {
+                $val = $hist[$k]
+                if (-not [double]::IsNaN($val) -and $val -gt $peak) { $peak = $val }
+            }
+            $floor = if ($metric.Floor) { [double]$metric.Floor } else { 1 }
+            if ($peak -lt $floor) { $peak = $floor }
+            $scaleMax = $peak * 1.15   # a little headroom above the peak
+        }
+        $span = [double]($scaleMax - $scaleMin); if ($span -le 0) { $span = 1 }
         for ($c = 0; $c -lt $wi; $c++) {
             $idx = $n - $wi + $c
             if ($idx -lt 0) { $lvl[$c] = -1; continue }
             $val = $hist[$idx]
             if ([double]::IsNaN($val)) { $lvl[$c] = -1; continue }
-            $fr = ($val - $metric.Min) / $span
+            $fr = ($val - $scaleMin) / $span
             if ($fr -lt 0) { $fr = 0 } elseif ($fr -gt 1) { $fr = 1 }
             $lvl[$c] = [int][math]::Round($fr * $hi * 8)
         }
@@ -453,14 +529,23 @@ public static void Enable() {
 # Build the full frame (rows + status bar) as one string, no leading cursor move.
 function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
     $gridH = $H - 1
-    $h0 = [int]($gridH / 3); $h1 = [int]($gridH / 3); $h2 = $gridH - $h0 - $h1
+    # Four equal-ish bands (CPU/temp, GPU/temp, MEM/VRAM, NET down/up); any
+    # leftover rows are handed to the bottom bands so nothing is dropped.
+    $bands = 4
+    $base = [int][math]::Floor($gridH / $bands)   # floor: [int] alone rounds, breaking the remainder math
+    $rem  = $gridH - ($base * $bands)
+    $bandH = @()
+    for ($b = 0; $b -lt $bands; $b++) {
+        $extra = if ($b -ge ($bands - $rem)) { 1 } else { 0 }
+        $bandH += ($base + $extra)
+    }
     $wL = [int]($W / 2); $wR = $W - $wL
-    $bandH = @($h0, $h1, $h2)
 
     $tempUnit = "$DEG" + 'C'
     $details = @{
         CPU = $cpuName; CPUTEMP = $cpuTempLabel; GPU = $gpuName
         GPUTEMP = $gpuTempLabel; MEM = $ramName; VRAM = 'Video Memory'
+        NETDOWN = $netName; NETUP = $netName
     }
     $values = @{
         CPU     = $(if ($f.Cpu  -eq $null) { 'n/a' } else { '{0:N0}%' -f $f.Cpu })
@@ -469,10 +554,12 @@ function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
         GPUTEMP = $(if ($f.GpuT -eq $null) { 'n/a' } else { ('{0:N0}' -f $f.GpuT) + $tempUnit })
         MEM     = ('{0:N1}/{1:N0} GB  {2:N0}%' -f $f.MemUsedGB, $f.MemTotalGB, $f.MemPct)
         VRAM    = ('{0:N1}/{1:N0} GB  {2:N0}%' -f $f.VramUsedGB, $f.VramTotalGB, $f.VramPct)
+        NETDOWN = (Format-Rate $f.NetDown)
+        NETUP   = (Format-Rate $f.NetUp)
     }
 
     $rows = New-Object System.Collections.Generic.List[string]
-    for ($band = 0; $band -lt 3; $band++) {
+    for ($band = 0; $band -lt $bands; $band++) {
         $bh = $bandH[$band]
         $mL = $Metrics[$band * 2]
         $mR = $Metrics[$band * 2 + 1]
@@ -502,14 +589,20 @@ if ($SelfTest) {
     $rx = New-Object System.Text.RegularExpressions.Regex ([char]27 + '\[[0-9;?]*[A-Za-z]')
     foreach ($m in $Metrics) {
         for ($j = 0; $j -lt $TestW; $j++) {
-            $base = switch ($m.Key) { 'CPU'{40} 'GPU'{55} 'MEM'{30} 'VRAM'{80} 'CPUTEMP'{55} 'GPUTEMP'{48} default{50} }
-            $v = $base + 25 * [math]::Sin($j / 4.0) + ($j % 7)
+            if ($m.Key -like 'NET*') {
+                # Bytes/sec scale so the dynamic auto-scaling path is exercised.
+                $base = if ($m.Key -eq 'NETDOWN') { 6MB } else { 1.5MB }
+                $v = $base + ($base * 0.6) * [math]::Sin($j / 4.0)
+            } else {
+                $base = switch ($m.Key) { 'CPU'{40} 'GPU'{55} 'MEM'{30} 'VRAM'{80} 'CPUTEMP'{55} 'GPUTEMP'{48} default{50} }
+                $v = $base + 25 * [math]::Sin($j / 4.0) + ($j % 7)
+            }
             [void]$Hist[$m.Key].Add([double]$v)
         }
     }
     $fake = [pscustomobject]@{
         Cpu=42.7; CpuT=55; Gpu=63.0; GpuT=48; MemPct=31.4; MemUsedGB=20.1; MemTotalGB=64
-        VramPct=80.2; VramUsedGB=16.0; VramTotalGB=20
+        VramPct=80.2; VramUsedGB=16.0; VramTotalGB=20; NetDown=(6MB); NetUp=(1.5MB)
     }
     $frame = Compose-Frame $TestW $TestH $fake 100
     $lines = $frame -split "`n"
@@ -528,7 +621,7 @@ if ($SelfTest) {
 # ----------------------------------------------------------------------------
 # Main loop.
 # ----------------------------------------------------------------------------
-$MinW = 56; $MinH = 16
+$MinW = 56; $MinH = 20
 $targetMs = [int]([math]::Max(16, $Interval * 1000))
 
 Enable-VT

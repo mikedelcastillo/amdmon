@@ -7,7 +7,9 @@
   repo moves. Re-running this script just updates/repairs the entry (idempotent).
 
   It also pre-downloads the hardware-monitoring libraries (LibreHardwareMonitor)
-  so the first `amdmon` run doesn't have to.
+  so the first `amdmon` run doesn't have to. (CPU/GPU/RAM/VRAM/temperatures use
+  these libs; network down/up throughput uses built-in Windows performance
+  counters and needs nothing extra downloaded.)
 
   Usage:  powershell -ExecutionPolicy Bypass -File install.ps1
 #>
