@@ -330,23 +330,39 @@ $blocks = @(' ',[char]0x2581,[char]0x2582,[char]0x2583,[char]0x2584,[char]0x2585
 $DEG = [char]0x00B0
 
 function Fg($r,$g,$b) { "$E[38;2;$r;$g;${b}m" }
+function FgRGB($c) { "$E[38;2;$($c[0]);$($c[1]);$($c[2])m" }
 
-# Vertical gradient green -> yellow -> red by height fraction f (0..1).
-function Grad-Fg([double]$f) {
-    if ($f -lt 0) { $f = 0 } elseif ($f -gt 1) { $f = 1 }
-    if ($f -lt 0.5) {
-        $t = $f / 0.5
-        $r = [int](46  + (241 - 46)  * $t)
-        $g = [int](204 + (196 - 204) * $t)
-        $b = [int](113 + (15  - 113) * $t)
-    } else {
-        $t = ($f - 0.5) / 0.5
-        $r = [int](241 + (231 - 241) * $t)
-        $g = [int](196 + (76  - 196) * $t)
-        $b = [int](15  + (60  - 15)  * $t)
-    }
-    return (Fg $r $g $b)
+# Scale an RGB triple toward black (k<1) or white-ish (k>1, clamped). Used to
+# derive a dim structural shade and a bright highlight from one accent colour.
+function Scale-RGB($c, [double]$k) {
+    @(
+        [int][math]::Min(255, [math]::Max(0, $c[0] * $k)),
+        [int][math]::Min(255, [math]::Max(0, $c[1] * $k)),
+        [int][math]::Min(255, [math]::Max(0, $c[2] * $k))
+    )
 }
+
+# Multi-stop colour ramp: $stops is an array of @(r,g,b); f in 0..1 picks a
+# smoothly interpolated shade across them. Lets each panel carry its own
+# meaning-coded gradient (load = green->red, thermal = cool->hot, net = mono).
+function Ramp-Fg($stops, [double]$f) {
+    if ($f -lt 0) { $f = 0 } elseif ($f -gt 1) { $f = 1 }
+    $segs = $stops.Count - 1
+    if ($segs -le 0) { return (FgRGB $stops[0]) }
+    $pos = $f * $segs
+    $i = [int][math]::Floor($pos)
+    if ($i -ge $segs) { $i = $segs - 1 }
+    $t = $pos - $i
+    $a = $stops[$i]; $b = $stops[$i + 1]
+    return (Fg ([int]($a[0] + ($b[0]-$a[0])*$t)) ([int]($a[1] + ($b[1]-$a[1])*$t)) ([int]($a[2] + ($b[2]-$a[2])*$t)))
+}
+
+# Meaning-coded vertical ramps (bottom shade -> top shade), built from layered
+# mid-tones rather than flat primaries.
+$RampLoad    = @( @(70,150,110), @(120,190,110), @(210,195,95),  @(226,150,74),  @(220,84,80) )   # cool green -> gold -> warm red
+$RampThermal = @( @(74,116,196), @(82,178,205),  @(108,196,140), @(224,196,96),  @(226,140,74), @(220,80,72) ) # blue -> cyan -> green -> amber -> red
+$RampNetDown = @( @(18,64,68),   @(34,120,120),  @(70,190,180),  @(150,240,225) )                 # deep teal -> bright aqua
+$RampNetUp   = @( @(70,50,18),   @(150,110,38),  @(225,170,66),  @(252,222,150) )                 # dark amber -> bright gold
 
 # Metric layout: order maps to grid (left,right per band, top to bottom):
 #   row0: CPU      | MEM
@@ -356,17 +372,23 @@ function Grad-Fg([double]$f) {
 # Dynamic metrics (network) auto-scale the graph to their recent peak instead of
 # using a fixed 0..Max range, since throughput has no natural ceiling.
 $Metrics = @(
-    @{ Key='CPU';     Label='CPU';      Accent=(Fg 0 200 255);   Min=0;  Max=100 }
-    @{ Key='MEM';     Label='MEM';      Accent=(Fg 100 150 255); Min=0;  Max=100 }
-    @{ Key='GPU';     Label='GPU';      Accent=(Fg 90 220 120);  Min=0;  Max=100 }
-    @{ Key='VRAM';    Label='VRAM';     Accent=(Fg 185 120 255); Min=0;  Max=100 }
-    @{ Key='CPUTEMP'; Label='CPU TEMP'; Accent=(Fg 255 150 40);  Min=20; Max=100 }
-    @{ Key='GPUTEMP'; Label='GPU TEMP'; Accent=(Fg 255 90 60);   Min=20; Max=100 }
-    @{ Key='NETDOWN'; Label='NET DOWN'; Accent=(Fg 80 220 200);  Min=0;  Max=100; Dynamic=$true; Floor=131072 }
-    @{ Key='NETUP';   Label='NET UP';   Accent=(Fg 250 180 80);  Min=0;  Max=100; Dynamic=$true; Floor=131072 }
+    @{ Key='CPU';     Label='CPU';      RGB=@(86,180,233);  Ramp=$RampLoad;    Min=0;  Max=100 }
+    @{ Key='MEM';     Label='MEM';      RGB=@(120,140,235); Ramp=$RampLoad;    Min=0;  Max=100 }
+    @{ Key='GPU';     Label='GPU';      RGB=@(80,200,140);  Ramp=$RampLoad;    Min=0;  Max=100 }
+    @{ Key='VRAM';    Label='VRAM';     RGB=@(175,130,235); Ramp=$RampLoad;    Min=0;  Max=100 }
+    @{ Key='CPUTEMP'; Label='CPU TEMP'; RGB=@(235,160,70);  Ramp=$RampThermal; Min=20; Max=100 }
+    @{ Key='GPUTEMP'; Label='GPU TEMP'; RGB=@(232,110,90);  Ramp=$RampThermal; Min=20; Max=100 }
+    @{ Key='NETDOWN'; Label='NET DOWN'; RGB=@(70,200,190);  Ramp=$RampNetDown; Min=0;  Max=100; Dynamic=$true; Floor=131072 }
+    @{ Key='NETUP';   Label='NET UP';   RGB=@(238,180,90);  Ramp=$RampNetUp;   Min=0;  Max=100; Dynamic=$true; Floor=131072 }
 )
+# Derive each panel's bright accent (title text), a dim structural shade (box
+# border, so frames recede behind the data), and its history buffer.
 $Hist = @{}
-foreach ($m in $Metrics) { $Hist[$m.Key] = New-Object System.Collections.ArrayList }
+foreach ($m in $Metrics) {
+    $m.Accent    = (FgRGB $m.RGB)
+    $m.AccentDim = (FgRGB (Scale-RGB $m.RGB 0.48))
+    $Hist[$m.Key] = New-Object System.Collections.ArrayList
+}
 
 function Add-History($f) {
     $vals = @{ CPU=$f.Cpu; CPUTEMP=$f.CpuT; GPU=$f.Gpu; GPUTEMP=$f.GpuT; MEM=$f.MemPct; VRAM=$f.VramPct; NETDOWN=$f.NetDown; NETUP=$f.NetUp }
@@ -396,7 +418,8 @@ function Build-TitleBar([int]$w, [string]$left, [string]$right) {
 
 # Render one panel to an array of $h ANSI strings, each $w cells wide.
 function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value, [double]$cur) {
-    $accent = $metric.Accent
+    $accent = $metric.Accent        # bright: title label
+    $dim    = $metric.AccentDim     # dim: box frame, so the data reads above it
     $tl=[char]0x256D; $tr=[char]0x256E; $bl=[char]0x2570; $br=[char]0x256F; $vb=[char]0x2502
     $lines = New-Object System.Collections.Generic.List[string]
     if ($w -lt 2 -or $h -lt 1) { for ($i=0;$i -lt $h;$i++){ $lines.Add(' ' * $w) }; return $lines }
@@ -408,16 +431,23 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
     $maxLeft = $wi - (" $value ".Length) - 4
     if ($maxLeft -gt 4 -and $left.Length -gt $maxLeft) { $left = $left.Substring(0, $maxLeft - 1) + [char]0x2026 }
 
-    # --- top border with title; value highlighted bright white ---
+    # --- top border with title; frame dim, label bright accent, value bright white ---
     $bar = Build-TitleBar $wi $left $value
+    # Overlay value (right side) first so the later left-side label splice keeps
+    # its character indices valid.
     if ($value) {
         $R = " $value "
         $vs = $wi - $R.Length - 1
         if ($vs -ge 0 -and ($vs + $R.Length) -le $bar.Length) {
-            $bar = $bar.Substring(0,$vs) + "$RESET$BOLD" + (Fg 245 245 245) + $bar.Substring($vs,$R.Length) + $RESET + $accent + $bar.Substring($vs + $R.Length)
+            $bar = $bar.Substring(0,$vs) + "$RESET$BOLD" + (Fg 245 245 245) + $bar.Substring($vs,$R.Length) + $RESET + $dim + $bar.Substring($vs + $R.Length)
         }
     }
-    $lines.Add("$accent$tl$bar$tr$RESET")
+    # Overlay the title label span (sits at index 1) in the bright accent.
+    $Lstr = " $left "
+    if ($Lstr.Length -gt 0 -and (1 + $Lstr.Length) -le $bar.Length) {
+        $bar = $bar.Substring(0,1) + $accent + $bar.Substring(1, $Lstr.Length) + $dim + $bar.Substring(1 + $Lstr.Length)
+    }
+    $lines.Add("$dim$tl$bar$tr$RESET")
 
     $hi = $h - 2
     if ($hi -lt 0) { $hi = 0 }
@@ -455,7 +485,7 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
         for ($i = 0; $i -lt $hi; $i++) {
             $rowFromBottom = $hi - 1 - $i
             $rowBase = $rowFromBottom * 8
-            $rowFg = Grad-Fg ([double]($rowFromBottom + 1) / $hi)
+            $rowFg = Ramp-Fg $metric.Ramp ([double]($rowFromBottom + 1) / $hi)
             $sb = New-Object System.Text.StringBuilder $wi
             for ($c = 0; $c -lt $wi; $c++) {
                 $L = $lvl[$c]
@@ -465,16 +495,16 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
                 elseif ($cell -le 0) { [void]$sb.Append(' ') }
                 else { [void]$sb.Append($blocks[$cell]) }
             }
-            $lines.Add("$accent$vb$rowFg$($sb.ToString())$RESET$accent$vb$RESET")
+            $lines.Add("$dim$vb$rowFg$($sb.ToString())$RESET$dim$vb$RESET")
         }
     }
 
     # --- bottom border ---
     if ($h -ge 2) {
-        $lines.Add("$accent$bl$([string][char]0x2500 * $wi)$br$RESET")
+        $lines.Add("$dim$bl$([string][char]0x2500 * $wi)$br$RESET")
     }
     # pad/truncate to exactly $h lines
-    while ($lines.Count -lt $h) { $lines.Add("$accent$vb$(' ' * $wi)$vb$RESET") }
+    while ($lines.Count -lt $h) { $lines.Add("$dim$vb$(' ' * $wi)$vb$RESET") }
     if ($lines.Count -gt $h) { $lines = $lines.GetRange(0, $h) }
     return $lines
 }
@@ -570,10 +600,16 @@ function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
 
     # status bar on the last row (skip the final cell to avoid auto-scroll)
     $tempState = if ($haveLhm) { 'LHM' } else { 'counters' }
-    $statusPlain = " amdmon   {0}ms   {1}   src:{2}   {3}x{4}   q quit" -f $targetMs, (Get-Date -Format 'HH:mm:ss'), $tempState, $W, $H
+    $netState  = if ($haveNet) { 'net' } else { 'net:off' }
+    $statusPlain = " amdmon   {0}ms   {1}   src:{2}   {3}   {4}x{5}   q quit" -f $targetMs, (Get-Date -Format 'HH:mm:ss'), $tempState, $netState, $W, $H
     if ($statusPlain.Length -gt ($W - 1)) { $statusPlain = $statusPlain.Substring(0, $W - 1) }
     else { $statusPlain = $statusPlain.PadRight($W - 1) }
-    $status = "$DIM$(Fg 150 150 160)$statusPlain$RESET"
+    # Brand in a soft accent, the rest a calm slate, for a quieter footer.
+    if ($statusPlain.Length -ge 7) {
+        $status = "$BOLD$(Fg 130 205 235)$($statusPlain.Substring(0,7))$RESET$DIM$(Fg 120 134 150)$($statusPlain.Substring(7))$RESET"
+    } else {
+        $status = "$DIM$(Fg 120 134 150)$statusPlain$RESET"
+    }
 
     $sb = New-Object System.Text.StringBuilder
     foreach ($r in $rows) { [void]$sb.Append($r); [void]$sb.Append("`n") }

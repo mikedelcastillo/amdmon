@@ -34,7 +34,8 @@ The rendering uses ANSI true-color and redraws in place, so it **fills the whole
 ## Features
 
 - **Full-screen TUI** that uses the entire terminal width and height, with a warning when the window is too small
-- **CPU / RAM / GPU / VRAM usage**, **CPU / GPU temperatures**, and **network down/up throughput**, each with a scrolling **history graph** and a green→yellow→red gradient
+- **CPU / RAM / GPU / VRAM usage**, **CPU / GPU temperatures**, and **network down/up throughput**, each with a scrolling **history graph**
+- **Meaning-coded colour ramps** built from layered shades (not flat primaries): utilisation panels run green→gold→red, temperature panels run a cool-blue→cyan→amber→red thermal scale, and the network panels use single-hue brightness ramps (teal for down, gold for up). Each panel's frame is a dimmed shade of its accent so the data reads above the chrome.
 - **Auto-scaling network graphs** — the down/up panels scale to their recent peak (with a sensible floor), so both a trickle and a saturated link stay readable
 - **Component names** shown inline — CPU model, GPU model, RAM size/type/speed, and the active network adapter
 - **~100 ms refresh**, flicker-free (in-place ANSI redraw)
