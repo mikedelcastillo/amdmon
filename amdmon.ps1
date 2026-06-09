@@ -584,16 +584,8 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
 function Render-CoreCellLine($core, [int]$w, [int]$histIndex, [int]$line, [int]$cellH) {
     if ($w -lt 1) { return '' }
     if (-not $core) { return ' ' * $w }
-    $label = [string]$core.Label
-    if (-not $label) { $label = "C$histIndex" }
-    $label = $label -replace '^CPU\s+', ''
-    $label = $label -replace '^Core\s+', ''
-    $label = $label -replace '^C(?=\d+$)', ''
-    if ($label.Length -gt 3) { $label = $label.Substring(0, 3) }
-
     $pct = $core.Value
     $pctText = if ($pct -eq $null) { 'n/a' } else { '{0:N0}%' -f $pct }
-    $prefix = $label.PadRight([math]::Max(2, $label.Length))
     $suffix = $pctText.PadLeft(4)
     $cellH = [math]::Max(1, $cellH)
     $line = [math]::Max(0, [math]::Min($cellH - 1, $line))
@@ -629,11 +621,7 @@ function Render-CoreCellLine($core, [int]$w, [int]$histIndex, [int]$line, [int]$
 
     $plain = $sb.ToString()
     if ($line -eq 0) {
-        $left = $prefix
         $right = $suffix
-        if ($left.Length -le $w) {
-            $plain = $left + $plain.Substring([math]::Min($left.Length, $plain.Length))
-        }
         if ($right.Length -lt $w) {
             $start = $w - $right.Length
             $plain = $plain.Substring(0, $start) + $right
