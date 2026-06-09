@@ -586,12 +586,14 @@ function Render-CoreCell($core, [int]$w, [int]$histIndex) {
     if (-not $core) { return ' ' * $w }
     $label = [string]$core.Label
     if (-not $label) { $label = "C$histIndex" }
-    $label = $label -replace '^Core\s+', 'C'
-    if ($label.Length -gt 4) { $label = $label.Substring(0, 4) }
+    $label = $label -replace '^CPU\s+', ''
+    $label = $label -replace '^Core\s+', ''
+    $label = $label -replace '^C(?=\d+$)', ''
+    if ($label.Length -gt 3) { $label = $label.Substring(0, 3) }
 
     $pct = $core.Value
     $pctText = if ($pct -eq $null) { 'n/a' } else { '{0:N0}%' -f $pct }
-    $prefix = $label.PadRight(4)
+    $prefix = $label.PadRight([math]::Max(2, $label.Length))
     $suffix = $pctText.PadLeft(4)
     $barW = $w - $prefix.Length - $suffix.Length - 2
     if ($barW -lt 1) {
@@ -624,6 +626,38 @@ function Render-CoreCell($core, [int]$w, [int]$histIndex) {
     $plain = "$prefix $bar $suffix"
     if ($plain.Length -gt $w) { $plain = $plain.Substring(0, $w) }
     return $plain.PadRight($w)
+}
+
+function Get-CoreGridLayout([int]$coreCount, [int]$innerWidth, [int]$innerHeight) {
+    $best = $null
+    $idealCellW = 16
+    for ($cols = 1; $cols -le $coreCount; $cols++) {
+        $rows = [int][math]::Ceiling($coreCount / [double]$cols)
+        if ($rows -gt $innerHeight) { continue }
+        if ((($cols - 1) * $rows) -ge $coreCount) { continue } # no fully empty trailing columns
+
+        $gap = if ($cols -gt 1) { 1 } else { 0 }
+        $contentW = $innerWidth - ($gap * ($cols - 1))
+        if ($contentW -lt $cols) { $contentW = $cols; $gap = 0 }
+        $colW = [int][math]::Floor($contentW / $cols)
+
+        $rowCounts = @()
+        for ($c = 0; $c -lt $cols; $c++) {
+            $remaining = $coreCount - ($c * $rows)
+            $rowCounts += [math]::Max(0, [math]::Min($rows, $remaining))
+        }
+        $balancePenalty = (($rowCounts | Measure-Object -Maximum).Maximum - ($rowCounts | Measure-Object -Minimum).Minimum) * 4
+        $unusedPenalty = ($innerHeight - $rows) * 4
+        $widthPenalty = [math]::Abs($colW - $idealCellW)
+        $tooNarrowPenalty = if ($colW -lt 12) { (12 - $colW) * 8 } else { 0 }
+        $score = $balancePenalty + $unusedPenalty + $widthPenalty + $tooNarrowPenalty
+
+        if (-not $best -or $score -lt $best.Score -or ($score -eq $best.Score -and $cols -lt $best.Cols)) {
+            $best = [pscustomobject]@{ Cols=$cols; Rows=$rows; Gap=$gap; ColW=$colW; Score=$score }
+        }
+    }
+    if ($best) { return $best }
+    return [pscustomobject]@{ Cols=$coreCount; Rows=1; Gap=0; ColW=[math]::Max(1, [int][math]::Floor($innerWidth / [math]::Max(1, $coreCount))); Score=[int]::MaxValue }
 }
 
 function Render-CorePanel($metric, [int]$w, [int]$h, [string]$detail, $cores) {
@@ -669,21 +703,21 @@ function Render-CorePanel($metric, [int]$w, [int]$h, [string]$detail, $cores) {
             $lines.Add("$dim$vb$RESET$DIM$(Fg 160 170 180)$line$RESET$dim$vb$RESET")
             for ($i = 1; $i -lt $hi; $i++) { $lines.Add("$dim$vb$(' ' * $wi)$vb$RESET") }
         } else {
-            $cols = [int][math]::Ceiling($coreList.Count / [math]::Max(1, $hi))
-            if ($cols -lt 1) { $cols = 1 }
-            if ($cols -gt $coreList.Count) { $cols = $coreList.Count }
-            $gap = if ($cols -gt 1) { 1 } else { 0 }
-            $contentW = $wi - ($gap * ($cols - 1))
-            if ($contentW -lt $cols) { $contentW = $cols; $gap = 0 }
-            $colW = [int][math]::Floor($contentW / $cols)
-            $visible = $hi * $cols
+            $layout = Get-CoreGridLayout $coreList.Count $wi $hi
+            $cols = $layout.Cols
+            $rowsNeeded = $layout.Rows
+            $gap = $layout.Gap
+            $colW = $layout.ColW
+            $visible = $rowsNeeded * $cols
             for ($r = 0; $r -lt $hi; $r++) {
                 $plainLen = 0
                 $row = New-Object System.Text.StringBuilder
                 for ($c = 0; $c -lt $cols; $c++) {
-                    $idx = ($c * $hi) + $r
+                    $idx = ($c * $rowsNeeded) + $r
                     $cw = if ($c -eq ($cols - 1)) { $wi - $plainLen } else { $colW }
-                    if ($coreList.Count -gt $visible -and $idx -eq ($visible - 1)) {
+                    if ($r -ge $rowsNeeded) {
+                        [void]$row.Append(' ' * $cw)
+                    } elseif ($coreList.Count -gt $visible -and $idx -eq ($visible - 1)) {
                         $more = '+{0} more' -f ($coreList.Count - $visible + 1)
                         if ($more.Length -gt $cw) { $more = $more.Substring(0, $cw) }
                         [void]$row.Append($more.PadRight($cw))
