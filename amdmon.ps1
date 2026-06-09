@@ -587,6 +587,7 @@ function Render-CoreCellLine($core, [int]$w, [int]$histIndex, [int]$line, [int]$
     $pct = $core.Value
     $pctText = if ($pct -eq $null) { 'n/a' } else { '{0:N0}%' -f $pct }
     $suffix = $pctText.PadLeft(4)
+    $coreFr = if ($pct -eq $null) { $null } else { [math]::Max(0, [math]::Min(1, [double]$pct / 100.0)) }
     $cellH = [math]::Max(1, $cellH)
     $line = [math]::Max(0, [math]::Min($cellH - 1, $line))
     $graphW = if ($line -eq 0 -and $suffix.Length -lt $w) { $w - $suffix.Length } else { $w }
@@ -620,7 +621,8 @@ function Render-CoreCellLine($core, [int]$w, [int]$histIndex, [int]$line, [int]$
             if ($currentFg) { [void]$sb.Append($RESET); $currentFg = $null }
             [void]$sb.Append(' ')
         } else {
-            $fg = Ramp-Fg $metric.Ramp ([math]::Max(0, [math]::Min(1, [double]$lvl / ($cellH * 8))))
+            $sampleFr = [math]::Max(0, [math]::Min(1, [double]$lvl / ($cellH * 8)))
+            $fg = Ramp-Fg $metric.Ramp $(if ($coreFr -ne $null) { $coreFr } else { $sampleFr })
             if ($fg -ne $currentFg) { [void]$sb.Append($fg); $currentFg = $fg }
             if ($cell -ge 8) { [void]$sb.Append($blocks[8]) }
             else { [void]$sb.Append($blocks[$cell]) }
