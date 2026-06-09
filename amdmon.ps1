@@ -595,38 +595,50 @@ function Render-CoreCellLine($core, [int]$w, [int]$histIndex, [int]$line, [int]$
     $pctText = if ($pct -eq $null) { 'n/a' } else { '{0:N0}%' -f $pct }
     $prefix = $label.PadRight([math]::Max(2, $label.Length))
     $suffix = $pctText.PadLeft(4)
-    $barW = if ($line -eq 0) { $w - $prefix.Length - $suffix.Length - 2 } else { $w }
-    if ($barW -lt 1) {
-        $plain = if ($line -eq 0) { ($prefix + ' ' + $suffix) } else { '' }
-        if ($plain.Length -gt $w) { return $plain.Substring(0, $w) }
-        return $plain.PadRight($w)
-    }
-
-    $bar = $null
+    $cellH = [math]::Max(1, $cellH)
+    $line = [math]::Max(0, [math]::Min($cellH - 1, $line))
+    $levels = New-Object 'int[]' $w
     if ($histIndex -lt $script:CpuCoreHist.Count -and $script:CpuCoreHist[$histIndex].Count -gt 0) {
         $hist = $script:CpuCoreHist[$histIndex]
-        $sb = New-Object System.Text.StringBuilder
-        $cellH = [math]::Max(1, $cellH)
-        $startOffset = ($cellH - 1 - $line) * $barW
-        for ($i = 0; $i -lt $barW; $i++) {
-            $idx = $hist.Count - $startOffset - $barW + $i
+        for ($i = 0; $i -lt $w; $i++) {
+            $idx = $hist.Count - $w + $i
             if ($idx -lt 0 -or [double]::IsNaN([double]$hist[$idx])) {
-                [void]$sb.Append(' ')
+                $levels[$i] = -1
             } else {
                 $fr = [math]::Max(0, [math]::Min(1, [double]$hist[$idx] / 100.0))
-                $bi = [int][math]::Ceiling($fr * 8)
-                if ($bi -lt 1) { $bi = 1 }
-                [void]$sb.Append($blocks[$bi])
+                $levels[$i] = [int][math]::Round($fr * $cellH * 8)
             }
         }
-        $bar = $sb.ToString()
     } else {
         $fr = if ($pct -eq $null) { 0 } else { [math]::Max(0, [math]::Min(1, [double]$pct / 100.0)) }
-        $fill = [int][math]::Round($fr * $barW)
-        $bar = ([string][char]0x2588 * $fill).PadRight($barW)
+        $lvl = [int][math]::Round($fr * $cellH * 8)
+        for ($i = 0; $i -lt $w; $i++) { $levels[$i] = $lvl }
     }
-    $plain = if ($line -eq 0) { "$prefix $bar $suffix" } else { $bar }
-    if ($plain.Length -gt $w) { $plain = $plain.Substring(0, $w) }
+
+    $rowFromBottom = $cellH - 1 - $line
+    $rowBase = $rowFromBottom * 8
+    $sb = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $w; $i++) {
+        $lvl = $levels[$i]
+        if ($lvl -lt 0) { [void]$sb.Append(' '); continue }
+        $cell = $lvl - $rowBase
+        if ($cell -ge 8) { [void]$sb.Append($blocks[8]) }
+        elseif ($cell -le 0) { [void]$sb.Append(' ') }
+        else { [void]$sb.Append($blocks[$cell]) }
+    }
+
+    $plain = $sb.ToString()
+    if ($line -eq 0) {
+        $left = $prefix
+        $right = $suffix
+        if ($left.Length -le $w) {
+            $plain = $left + $plain.Substring([math]::Min($left.Length, $plain.Length))
+        }
+        if ($right.Length -lt $w) {
+            $start = $w - $right.Length
+            $plain = $plain.Substring(0, $start) + $right
+        }
+    }
     return $plain.PadRight($w)
 }
 
