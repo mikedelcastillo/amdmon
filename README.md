@@ -34,6 +34,7 @@ The rendering uses ANSI true-color and redraws in place, so it **fills the whole
 ## Features
 
 - **Full-screen TUI** that uses the entire terminal width and height, with a warning when the window is too small
+- **Toggleable CPU view** - press `space` to switch the CPU block between total CPU usage and per-core usage
 - **CPU / RAM / GPU / VRAM usage**, **CPU / GPU temperatures**, and **network down/up throughput**, each with a scrolling **history graph**
 - **Meaning-coded colour ramps** built from layered shades (not flat primaries): utilisation panels run green→gold→red, temperature panels run a cool-blue→cyan→amber→red thermal scale, and the network panels use single-hue brightness ramps (teal for down, gold for up). Each panel's frame is a dimmed shade of its accent so the data reads above the chrome.
 - **Auto-scaling network graphs** — the down/up panels scale to their recent peak (with a sensible floor), so both a trickle and a saturated link stay readable
@@ -63,7 +64,7 @@ cd amdmon
 Run as **Administrator** to get temperatures:
 
 ```powershell
-# Full-screen dashboard, ~100 ms refresh. Press q or Ctrl+C to quit.
+# Full-screen dashboard, ~100 ms refresh. Press space to toggle CPU view, q to quit.
 powershell -ExecutionPolicy Bypass -File amdmon.ps1
 
 # Slower refresh (seconds)
@@ -96,7 +97,7 @@ This pre-downloads the libraries and adds a small function to your PowerShell `$
 Then use it like the script itself:
 
 ```powershell
-amdmon              # full-screen dashboard, q to quit
+amdmon              # full-screen dashboard, space toggles CPU view, q quits
 amdmon -Interval 1  # custom refresh interval
 amdmon -Once        # single snapshot
 ```

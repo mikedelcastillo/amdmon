@@ -12,7 +12,7 @@
   counters for usage and shows temperatures as "n/a". Network throughput comes
   from the built-in Network Interface performance counters (no extra dependency).
 
-  Usage:   amdmon                 # full-screen dashboard, ~100ms refresh (q or Ctrl+C to quit)
+  Usage:   amdmon                 # full-screen dashboard, ~100ms refresh (space toggles CPU view, q quits)
            amdmon -Interval 1     # slower refresh (seconds)
            amdmon -Once           # single text snapshot (good for logging)
            amdmon -NoTemp         # skip the temperature library entirely
@@ -130,6 +130,7 @@ function Initialize-Lhm {
         $script:GpuHw = $c.Hardware | Where-Object { "$($_.HardwareType)" -like 'Gpu*' } | Select-Object -First 1
 
         $script:S.CpuLoad  = Find-Sensor $script:CpuHw 'Load'      @('CPU Total')
+        $script:S.CpuCoreLoads = Find-CpuCoreLoadSensors $script:CpuHw
         $script:S.CpuTemp  = Find-Sensor $script:CpuHw 'Temperature' @('Core (Tctl/Tdie)','CPU Package','Core (Tctl)','CPU Cores')
         $script:S.GpuLoad  = Find-Sensor $script:GpuHw 'Load'      @('GPU Core','D3D 3D')
         $script:S.GpuTemp  = Find-Sensor $script:GpuHw 'Temperature' @('GPU Core','GPU Hot Spot')
@@ -149,6 +150,20 @@ function Find-Sensor($hw, [string]$type, [string[]]$names) {
         if ($s) { return $s }
     }
     return $hw.Sensors | Where-Object { "$($_.SensorType)" -eq $type } | Select-Object -First 1
+}
+
+function Find-CpuCoreLoadSensors($hw) {
+    if (-not $hw) { return @() }
+    $sensors = @($hw.Sensors | Where-Object {
+        "$($_.SensorType)" -eq 'Load' -and
+        $_.Name -match 'Core' -and
+        $_.Name -notmatch 'Total|Package|Max|Average'
+    })
+    return @($sensors | Sort-Object @{
+        Expression = {
+            if ($_.Name -match '#?\s*(\d+)') { [int]$matches[1] } else { [int]::MaxValue }
+        }
+    }, Name)
 }
 
 function Get-SensorValue($s) {
@@ -202,6 +217,25 @@ $cpuCtr = $null
 if (-not $haveLhm) {
     try { $cpuCtr = New-Object System.Diagnostics.PerformanceCounter('Processor','% Processor Time','_Total'); [void]$cpuCtr.NextValue() } catch { }
 }
+$script:CpuCoreCtrs = New-Object System.Collections.Generic.List[object]
+if ((-not $haveLhm) -or @($script:S.CpuCoreLoads).Count -eq 0) {
+    try {
+        $cpuCat = New-Object System.Diagnostics.PerformanceCounterCategory('Processor')
+        $instances = @($cpuCat.GetInstanceNames() | Where-Object { $_ -ne '_Total' } | Sort-Object @{
+            Expression = {
+                $n = 0
+                if ([int]::TryParse($_, [ref]$n)) { $n } else { [int]::MaxValue }
+            }
+        }, { $_ })
+        foreach ($inst in $instances) {
+            try {
+                $ctr = New-Object System.Diagnostics.PerformanceCounter('Processor','% Processor Time',$inst)
+                [void]$ctr.NextValue()
+                $script:CpuCoreCtrs.Add([pscustomobject]@{ Label = "C$inst"; Counter = $ctr })
+            } catch { }
+        }
+    } catch { }
+}
 
 # ---- Network throughput counters (bytes/sec, summed across real adapters) ----
 # These rate counters come straight from the Windows perf subsystem - no extra
@@ -246,12 +280,16 @@ $gpuTempLabel = if ($script:S.GpuTemp) { $script:S.GpuTemp.Name } else { 'Temper
 # ----------------------------------------------------------------------------
 function Get-Frame {
     $cpu = $null; $cpuT = $null; $gpu = $null; $gpuT = $null
+    $cpuCores = @()
     $vramUsedB = 0.0; $vramTotalB = [double]$totalVram
 
     if ($haveLhm) {
         if ($script:CpuHw) { $script:CpuHw.Update() }
         if ($script:GpuHw) { $script:GpuHw.Update() }
         $cpu  = Get-SensorValue $script:S.CpuLoad
+        foreach ($s in @($script:S.CpuCoreLoads)) {
+            $cpuCores += [pscustomobject]@{ Label = ($s.Name -replace '^CPU\s+', ''); Value = (Get-SensorValue $s) }
+        }
         $cpuT = Get-SensorValue $script:S.CpuTemp
         $gpu  = Get-SensorValue $script:S.GpuLoad
         $gpuT = Get-SensorValue $script:S.GpuTemp
@@ -269,6 +307,13 @@ function Get-Frame {
             $vramUsedB = ($mem | Measure-Object -Property CookedValue -Sum).Sum
             if (-not $vramUsedB) { $vramUsedB = 0 }
         } catch { }
+    }
+    if ($cpuCores.Count -eq 0 -and $script:CpuCoreCtrs.Count -gt 0) {
+        foreach ($entry in $script:CpuCoreCtrs) {
+            $v = $null
+            try { $v = [double]$entry.Counter.NextValue() } catch { }
+            $cpuCores += [pscustomobject]@{ Label = $entry.Label; Value = $v }
+        }
     }
 
     $ramUsedB = $totalRam
@@ -295,6 +340,7 @@ function Get-Frame {
         VramTotalGB= $vramTotalB / 1GB
         NetDown    = $netRx          # bytes/sec, or $null
         NetUp      = $netTx          # bytes/sec, or $null
+        CpuCores   = $cpuCores
     }
 }
 
@@ -394,6 +440,14 @@ foreach ($m in $Metrics) {
     $m.AccentDim = (FgRGB (Scale-RGB $m.RGB 0.48))
     $Hist[$m.Key] = New-Object System.Collections.ArrayList
 }
+$script:CpuCoreHist = @()
+
+function Ensure-CpuCoreHistory($cores) {
+    $count = @($cores).Count
+    while ($script:CpuCoreHist.Count -lt $count) {
+        $script:CpuCoreHist += ,(New-Object System.Collections.ArrayList)
+    }
+}
 
 function Add-History($f) {
     $vals = @{ CPU=$f.Cpu; CPUTEMP=$f.CpuT; GPU=$f.Gpu; GPUTEMP=$f.GpuT; MEM=$f.MemPct; VRAM=$f.VramPct; NETDOWN=$f.NetDown; NETUP=$f.NetUp }
@@ -402,6 +456,14 @@ function Add-History($f) {
         if ($v -eq $null) { $v = [double]::NaN }
         [void]$Hist[$m.Key].Add([double]$v)
         $h = $Hist[$m.Key]
+        if ($h.Count -gt 4000) { $h.RemoveRange(0, $h.Count - 4000) }
+    }
+    Ensure-CpuCoreHistory $f.CpuCores
+    for ($i = 0; $i -lt @($f.CpuCores).Count; $i++) {
+        $v = $f.CpuCores[$i].Value
+        if ($v -eq $null) { $v = [double]::NaN }
+        [void]$script:CpuCoreHist[$i].Add([double]$v)
+        $h = $script:CpuCoreHist[$i]
         if ($h.Count -gt 4000) { $h.RemoveRange(0, $h.Count - 4000) }
     }
 }
@@ -519,6 +581,129 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
     return $lines
 }
 
+function Render-CoreCell($core, [int]$w, [int]$histIndex) {
+    if ($w -lt 1) { return '' }
+    if (-not $core) { return ' ' * $w }
+    $label = [string]$core.Label
+    if (-not $label) { $label = "C$histIndex" }
+    $label = $label -replace '^Core\s+', 'C'
+    if ($label.Length -gt 4) { $label = $label.Substring(0, 4) }
+
+    $pct = $core.Value
+    $pctText = if ($pct -eq $null) { 'n/a' } else { '{0:N0}%' -f $pct }
+    $prefix = $label.PadRight(4)
+    $suffix = $pctText.PadLeft(4)
+    $barW = $w - $prefix.Length - $suffix.Length - 2
+    if ($barW -lt 1) {
+        $plain = ($prefix + ' ' + $suffix)
+        if ($plain.Length -gt $w) { return $plain.Substring(0, $w) }
+        return $plain.PadRight($w)
+    }
+
+    $bar = $null
+    if ($histIndex -lt $script:CpuCoreHist.Count -and $script:CpuCoreHist[$histIndex].Count -gt 0) {
+        $hist = $script:CpuCoreHist[$histIndex]
+        $sb = New-Object System.Text.StringBuilder
+        for ($i = 0; $i -lt $barW; $i++) {
+            $idx = $hist.Count - $barW + $i
+            if ($idx -lt 0 -or [double]::IsNaN([double]$hist[$idx])) {
+                [void]$sb.Append(' ')
+            } else {
+                $fr = [math]::Max(0, [math]::Min(1, [double]$hist[$idx] / 100.0))
+                $bi = [int][math]::Ceiling($fr * 8)
+                if ($bi -lt 1) { $bi = 1 }
+                [void]$sb.Append($blocks[$bi])
+            }
+        }
+        $bar = $sb.ToString()
+    } else {
+        $fr = if ($pct -eq $null) { 0 } else { [math]::Max(0, [math]::Min(1, [double]$pct / 100.0)) }
+        $fill = [int][math]::Round($fr * $barW)
+        $bar = ([string][char]0x2588 * $fill).PadRight($barW)
+    }
+    $plain = "$prefix $bar $suffix"
+    if ($plain.Length -gt $w) { $plain = $plain.Substring(0, $w) }
+    return $plain.PadRight($w)
+}
+
+function Render-CorePanel($metric, [int]$w, [int]$h, [string]$detail, $cores) {
+    $accent = $metric.Accent
+    $dim    = $metric.AccentDim
+    $tl=[char]0x256D; $tr=[char]0x256E; $bl=[char]0x2570; $br=[char]0x256F; $vb=[char]0x2502
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($w -lt 2 -or $h -lt 1) { for ($i=0;$i -lt $h;$i++){ $lines.Add(' ' * $w) }; return $lines }
+
+    $wi = $w - 2
+    $coreList = @($cores)
+    $valid = @($coreList | Where-Object { $_.Value -ne $null })
+    $value = if ($valid.Count -gt 0) { '{0:N0}% avg' -f (($valid | Measure-Object -Property Value -Average).Average) } else { 'n/a' }
+    $left = 'CPU CORES'
+    if ($detail) { $left = "CPU CORES  $detail" }
+
+    $valPad  = " $value "
+    $maxLeft = $wi - $valPad.Length - 4
+    if ($maxLeft -lt 1) { $maxLeft = 1 }
+    if ($left.Length -gt $maxLeft) { $left = $left.Substring(0, [math]::Max(1, $maxLeft - 1)) + [char]0x2026 }
+
+    $bar = Build-TitleBar $wi $left $value
+    $valStart = if ($value) { $wi - $valPad.Length - 1 } else { $wi }
+    if ($value -and $valStart -ge 0 -and ($valStart + $valPad.Length) -le $bar.Length) {
+        $bar = $bar.Substring(0,$valStart) + "$RESET$BOLD" + (Fg 245 245 245) + $bar.Substring($valStart,$valPad.Length) + $RESET + $dim + $bar.Substring($valStart + $valPad.Length)
+    }
+    $Lstr = " $left "
+    $lLen = [math]::Min($Lstr.Length, [math]::Max(0, $valStart - 1))
+    if ($lLen -gt 0 -and (1 + $lLen) -le $bar.Length) {
+        $bar = $bar.Substring(0,1) + $accent + $bar.Substring(1, $lLen) + $dim + $bar.Substring(1 + $lLen)
+    }
+    $lines.Add("$dim$tl$bar$tr$RESET")
+
+    $hi = $h - 2
+    if ($hi -lt 0) { $hi = 0 }
+    if ($hi -ge 1) {
+        if ($coreList.Count -eq 0) {
+            $msg = 'per-core data unavailable'
+            if ($msg.Length -gt $wi) { $msg = $msg.Substring(0, $wi) }
+            $pad = [int](($wi - $msg.Length) / 2); if ($pad -lt 0) { $pad = 0 }
+            $line = (' ' * $pad) + $msg
+            $line = $line.PadRight($wi)
+            $lines.Add("$dim$vb$RESET$DIM$(Fg 160 170 180)$line$RESET$dim$vb$RESET")
+            for ($i = 1; $i -lt $hi; $i++) { $lines.Add("$dim$vb$(' ' * $wi)$vb$RESET") }
+        } else {
+            $cols = [int][math]::Floor($wi / 12)
+            if ($cols -lt 1) { $cols = 1 }
+            if ($cols -gt $coreList.Count) { $cols = $coreList.Count }
+            $colW = [int][math]::Floor($wi / $cols)
+            $visible = $hi * $cols
+            for ($r = 0; $r -lt $hi; $r++) {
+                $plainLen = 0
+                $row = New-Object System.Text.StringBuilder
+                for ($c = 0; $c -lt $cols; $c++) {
+                    $idx = ($c * $hi) + $r
+                    $cw = if ($c -eq ($cols - 1)) { $wi - $plainLen } else { $colW }
+                    if ($coreList.Count -gt $visible -and $idx -eq ($visible - 1)) {
+                        $more = '+{0} more' -f ($coreList.Count - $visible + 1)
+                        if ($more.Length -gt $cw) { $more = $more.Substring(0, $cw) }
+                        [void]$row.Append($more.PadRight($cw))
+                    } elseif ($idx -lt $coreList.Count) {
+                        [void]$row.Append((Render-CoreCell $coreList[$idx] $cw $idx))
+                    } else {
+                        [void]$row.Append(' ' * $cw)
+                    }
+                    $plainLen += $cw
+                }
+                $lines.Add("$dim$vb$(Ramp-Fg $metric.Ramp ([double]($r + 1) / [math]::Max(1, $hi)))$($row.ToString())$RESET$dim$vb$RESET")
+            }
+        }
+    }
+
+    if ($h -ge 2) {
+        $lines.Add("$dim$bl$([string][char]0x2500 * $wi)$br$RESET")
+    }
+    while ($lines.Count -lt $h) { $lines.Add("$dim$vb$(' ' * $wi)$vb$RESET") }
+    if ($lines.Count -gt $h) { $lines = $lines.GetRange(0, $h) }
+    return $lines
+}
+
 function Draw-TooSmall([int]$w, [int]$h, [int]$minW, [int]$minH) {
     $msg = @(
         "$BOLD$(Fg 255 90 60)Terminal too small$RESET",
@@ -567,7 +752,7 @@ public static void Enable() {
 }
 
 # Build the full frame (rows + status bar) as one string, no leading cursor move.
-function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
+function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs, [string]$CpuMode) {
     $gridH = $H - 1
     # One band per metric pair, derived from $Metrics so adding/removing metrics
     # reflows automatically. Layout is left|right per band, top to bottom:
@@ -605,9 +790,17 @@ function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
         $bh = $bandH[$band]
         $mL = $Metrics[$band * 2]
         $mR = if (($band * 2 + 1) -lt $Metrics.Count) { $Metrics[$band * 2 + 1] } else { $null }
-        $pL = Render-Panel $mL $wL $bh $details[$mL.Key] $values[$mL.Key]
+        if ($mL.Key -eq 'CPU' -and $CpuMode -eq 'Cores') {
+            $pL = Render-CorePanel $mL $wL $bh $details[$mL.Key] $f.CpuCores
+        } else {
+            $pL = Render-Panel $mL $wL $bh $details[$mL.Key] $values[$mL.Key]
+        }
         if ($mR) {
-            $pR = Render-Panel $mR $wR $bh $details[$mR.Key] $values[$mR.Key]
+            if ($mR.Key -eq 'CPU' -and $CpuMode -eq 'Cores') {
+                $pR = Render-CorePanel $mR $wR $bh $details[$mR.Key] $f.CpuCores
+            } else {
+                $pR = Render-Panel $mR $wR $bh $details[$mR.Key] $values[$mR.Key]
+            }
         } else {
             # Odd metric count: pad the right half with an empty spacer column.
             $pR = New-Object System.Collections.Generic.List[string]
@@ -619,7 +812,8 @@ function Compose-Frame([int]$W, [int]$H, $f, [int]$targetMs) {
     # status bar on the last row (skip the final cell to avoid auto-scroll)
     $tempState = if ($haveLhm) { 'LHM' } else { 'counters' }
     $netState  = if ($haveNet) { 'net' } else { 'net:off' }
-    $statusPlain = " amdmon   {0}ms   {1}   src:{2}   {3}   {4}x{5}   q quit" -f $targetMs, (Get-Date -Format 'HH:mm:ss'), $tempState, $netState, $W, $H
+    $cpuHint = if ($CpuMode -eq 'Cores') { 'space total' } else { 'space cores' }
+    $statusPlain = " amdmon   {0}ms   {1}   src:{2}   {3}   cpu:{4}   {5}x{6}   {7}   q quit" -f $targetMs, (Get-Date -Format 'HH:mm:ss'), $tempState, $netState, $CpuMode.ToLowerInvariant(), $W, $H, $cpuHint
     if ($statusPlain.Length -gt ($W - 1)) { $statusPlain = $statusPlain.Substring(0, $W - 1) }
     else { $statusPlain = $statusPlain.PadRight($W - 1) }
     # Brand in a soft accent, the rest a calm slate, for a quieter footer.
@@ -657,18 +851,37 @@ if ($SelfTest) {
     $fake = [pscustomobject]@{
         Cpu=42.7; CpuT=55; Gpu=63.0; GpuT=48; MemPct=31.4; MemUsedGB=20.1; MemTotalGB=64
         VramPct=80.2; VramUsedGB=16.0; VramTotalGB=20; NetDown=(6MB); NetUp=(1.5MB)
+        CpuCores=@(
+            [pscustomobject]@{ Label='C0';  Value=12.0 }, [pscustomobject]@{ Label='C1';  Value=24.0 }
+            [pscustomobject]@{ Label='C2';  Value=36.0 }, [pscustomobject]@{ Label='C3';  Value=48.0 }
+            [pscustomobject]@{ Label='C4';  Value=60.0 }, [pscustomobject]@{ Label='C5';  Value=72.0 }
+            [pscustomobject]@{ Label='C6';  Value=84.0 }, [pscustomobject]@{ Label='C7';  Value=96.0 }
+            [pscustomobject]@{ Label='C8';  Value=20.0 }, [pscustomobject]@{ Label='C9';  Value=40.0 }
+            [pscustomobject]@{ Label='C10'; Value=60.0 }, [pscustomobject]@{ Label='C11'; Value=80.0 }
+            [pscustomobject]@{ Label='C12'; Value=18.0 }, [pscustomobject]@{ Label='C13'; Value=38.0 }
+            [pscustomobject]@{ Label='C14'; Value=58.0 }, [pscustomobject]@{ Label='C15'; Value=78.0 }
+        )
     }
-    $frame = Compose-Frame $TestW $TestH $fake 100
-    $lines = $frame -split "`n"
-    Write-Host "=== rendered ${TestW}x${TestH} (ANSI stripped) ===" -ForegroundColor Cyan
-    $bad = 0
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $plain = $rx.Replace($lines[$i], '')
-        $len = $plain.Length
-        $flag = if ($i -lt ($lines.Count - 1) -and $len -ne $TestW) { $bad++; " <-- WIDTH $len" } elseif ($i -eq ($lines.Count - 1) -and $len -ne ($TestW - 1)) { $bad++; " <-- STATUS $len" } else { '' }
-        Write-Host ("{0,2}|{1}|{2}" -f $i, $plain, $flag)
+    Ensure-CpuCoreHistory $fake.CpuCores
+    for ($i = 0; $i -lt $fake.CpuCores.Count; $i++) {
+        for ($j = 0; $j -lt $TestW; $j++) {
+            $v = [math]::Max(0, [math]::Min(100, $fake.CpuCores[$i].Value + 18 * [math]::Sin(($j + $i) / 5.0)))
+            [void]$script:CpuCoreHist[$i].Add([double]$v)
+        }
     }
-    Write-Host "lines=$($lines.Count) expected=$TestH  widthErrors=$bad" -ForegroundColor $(if ($bad -eq 0 -and $lines.Count -eq $TestH) { 'Green' } else { 'Red' })
+    foreach ($mode in @('Total','Cores')) {
+        $frame = Compose-Frame $TestW $TestH $fake 100 $mode
+        $lines = $frame -split "`n"
+        Write-Host "=== rendered ${TestW}x${TestH} mode=$mode (ANSI stripped) ===" -ForegroundColor Cyan
+        $bad = 0
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $plain = $rx.Replace($lines[$i], '')
+            $len = $plain.Length
+            $flag = if ($i -lt ($lines.Count - 1) -and $len -ne $TestW) { $bad++; " <-- WIDTH $len" } elseif ($i -eq ($lines.Count - 1) -and $len -ne ($TestW - 1)) { $bad++; " <-- STATUS $len" } else { '' }
+            Write-Host ("{0,2}|{1}|{2}" -f $i, $plain, $flag)
+        }
+        Write-Host "mode=$mode lines=$($lines.Count) expected=$TestH  widthErrors=$bad" -ForegroundColor $(if ($bad -eq 0 -and $lines.Count -eq $TestH) { 'Green' } else { 'Red' })
+    }
     return
 }
 
@@ -688,11 +901,20 @@ try { $prevCursor = [Console]::CursorVisible } catch { }
 
 [Console]::Out.Write("$E[?25l$E[2J$E[H")   # hide cursor, clear
 $sw = New-Object System.Diagnostics.Stopwatch
+$script:CpuMode = 'Total'
 try {
     while ($true) {
         $sw.Restart()
-        # quit on 'q'
-        try { if ([Console]::KeyAvailable) { $k = [Console]::ReadKey($true); if ($k.KeyChar -eq 'q' -or $k.KeyChar -eq 'Q') { break } } } catch { }
+        # q quits; space toggles the CPU panel between total and per-core views.
+        try {
+            while ([Console]::KeyAvailable) {
+                $k = [Console]::ReadKey($true)
+                if ($k.KeyChar -eq 'q' -or $k.KeyChar -eq 'Q') { break 2 }
+                if ($k.Key -eq [ConsoleKey]::Spacebar) {
+                    $script:CpuMode = if ($script:CpuMode -eq 'Cores') { 'Total' } else { 'Cores' }
+                }
+            }
+        } catch { }
 
         $W = [Console]::WindowWidth
         $H = [Console]::WindowHeight
@@ -706,7 +928,7 @@ try {
             continue
         }
 
-        [Console]::Out.Write("$E[H" + (Compose-Frame $W $H $f $targetMs))
+        [Console]::Out.Write("$E[H" + (Compose-Frame $W $H $f $targetMs $script:CpuMode))
 
         $rem = $targetMs - [int]$sw.ElapsedMilliseconds
         if ($rem -gt 0) { Start-Sleep -Milliseconds $rem }
@@ -719,6 +941,7 @@ try {
     # Release the unmanaged PDH handles held by the performance counters.
     foreach ($c in $script:NetRxCtrs) { try { $c.Dispose() } catch { } }
     foreach ($c in $script:NetTxCtrs) { try { $c.Dispose() } catch { } }
+    foreach ($c in $script:CpuCoreCtrs) { try { $c.Counter.Dispose() } catch { } }
     if ($memAvail) { try { $memAvail.Dispose() } catch { } }
     if ($cpuCtr)   { try { $cpuCtr.Dispose() } catch { } }
 }
