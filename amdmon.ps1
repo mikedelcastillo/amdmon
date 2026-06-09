@@ -581,7 +581,7 @@ function Render-Panel($metric, [int]$w, [int]$h, [string]$detail, [string]$value
     return $lines
 }
 
-function Render-CoreCell($core, [int]$w, [int]$histIndex) {
+function Render-CoreCellLine($core, [int]$w, [int]$histIndex, [int]$line, [int]$cellH) {
     if ($w -lt 1) { return '' }
     if (-not $core) { return ' ' * $w }
     $label = [string]$core.Label
@@ -595,9 +595,9 @@ function Render-CoreCell($core, [int]$w, [int]$histIndex) {
     $pctText = if ($pct -eq $null) { 'n/a' } else { '{0:N0}%' -f $pct }
     $prefix = $label.PadRight([math]::Max(2, $label.Length))
     $suffix = $pctText.PadLeft(4)
-    $barW = $w - $prefix.Length - $suffix.Length - 2
+    $barW = if ($line -eq 0) { $w - $prefix.Length - $suffix.Length - 2 } else { $w }
     if ($barW -lt 1) {
-        $plain = ($prefix + ' ' + $suffix)
+        $plain = if ($line -eq 0) { ($prefix + ' ' + $suffix) } else { '' }
         if ($plain.Length -gt $w) { return $plain.Substring(0, $w) }
         return $plain.PadRight($w)
     }
@@ -606,8 +606,10 @@ function Render-CoreCell($core, [int]$w, [int]$histIndex) {
     if ($histIndex -lt $script:CpuCoreHist.Count -and $script:CpuCoreHist[$histIndex].Count -gt 0) {
         $hist = $script:CpuCoreHist[$histIndex]
         $sb = New-Object System.Text.StringBuilder
+        $cellH = [math]::Max(1, $cellH)
+        $startOffset = ($cellH - 1 - $line) * $barW
         for ($i = 0; $i -lt $barW; $i++) {
-            $idx = $hist.Count - $barW + $i
+            $idx = $hist.Count - $startOffset - $barW + $i
             if ($idx -lt 0 -or [double]::IsNaN([double]$hist[$idx])) {
                 [void]$sb.Append(' ')
             } else {
@@ -623,7 +625,7 @@ function Render-CoreCell($core, [int]$w, [int]$histIndex) {
         $fill = [int][math]::Round($fr * $barW)
         $bar = ([string][char]0x2588 * $fill).PadRight($barW)
     }
-    $plain = "$prefix $bar $suffix"
+    $plain = if ($line -eq 0) { "$prefix $bar $suffix" } else { $bar }
     if ($plain.Length -gt $w) { $plain = $plain.Substring(0, $w) }
     return $plain.PadRight($w)
 }
@@ -709,20 +711,23 @@ function Render-CorePanel($metric, [int]$w, [int]$h, [string]$detail, $cores) {
             $gap = $layout.Gap
             $colW = $layout.ColW
             $visible = $rowsNeeded * $cols
-            for ($r = 0; $r -lt $hi; $r++) {
+            $baseCellH = [int][math]::Floor($hi / $rowsNeeded)
+            if ($baseCellH -lt 1) { $baseCellH = 1 }
+            $extraRows = $hi - ($baseCellH * $rowsNeeded)
+            for ($r = 0; $r -lt $rowsNeeded; $r++) {
+                $cellH = $baseCellH + $(if ($r -lt $extraRows) { 1 } else { 0 })
+                for ($cellLine = 0; $cellLine -lt $cellH; $cellLine++) {
                 $plainLen = 0
                 $row = New-Object System.Text.StringBuilder
                 for ($c = 0; $c -lt $cols; $c++) {
                     $idx = ($c * $rowsNeeded) + $r
                     $cw = if ($c -eq ($cols - 1)) { $wi - $plainLen } else { $colW }
-                    if ($r -ge $rowsNeeded) {
-                        [void]$row.Append(' ' * $cw)
-                    } elseif ($coreList.Count -gt $visible -and $idx -eq ($visible - 1)) {
+                    if ($coreList.Count -gt $visible -and $idx -eq ($visible - 1) -and $cellLine -eq 0) {
                         $more = '+{0} more' -f ($coreList.Count - $visible + 1)
                         if ($more.Length -gt $cw) { $more = $more.Substring(0, $cw) }
                         [void]$row.Append($more.PadRight($cw))
                     } elseif ($idx -lt $coreList.Count) {
-                        [void]$row.Append((Render-CoreCell $coreList[$idx] $cw $idx))
+                        [void]$row.Append((Render-CoreCellLine $coreList[$idx] $cw $idx $cellLine $cellH))
                     } else {
                         [void]$row.Append(' ' * $cw)
                     }
@@ -732,7 +737,8 @@ function Render-CorePanel($metric, [int]$w, [int]$h, [string]$detail, $cores) {
                         $plainLen += $gap
                     }
                 }
-                $lines.Add("$dim$vb$(Ramp-Fg $metric.Ramp ([double]($r + 1) / [math]::Max(1, $hi)))$($row.ToString())$RESET$dim$vb$RESET")
+                    $lines.Add("$dim$vb$(Ramp-Fg $metric.Ramp ([double]($r + 1) / [math]::Max(1, $rowsNeeded)))$($row.ToString())$RESET$dim$vb$RESET")
+                }
             }
         }
     }
