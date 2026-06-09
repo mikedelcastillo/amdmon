@@ -669,10 +669,13 @@ function Render-CorePanel($metric, [int]$w, [int]$h, [string]$detail, $cores) {
             $lines.Add("$dim$vb$RESET$DIM$(Fg 160 170 180)$line$RESET$dim$vb$RESET")
             for ($i = 1; $i -lt $hi; $i++) { $lines.Add("$dim$vb$(' ' * $wi)$vb$RESET") }
         } else {
-            $cols = [int][math]::Floor($wi / 12)
+            $cols = [int][math]::Ceiling($coreList.Count / [math]::Max(1, $hi))
             if ($cols -lt 1) { $cols = 1 }
             if ($cols -gt $coreList.Count) { $cols = $coreList.Count }
-            $colW = [int][math]::Floor($wi / $cols)
+            $gap = if ($cols -gt 1) { 1 } else { 0 }
+            $contentW = $wi - ($gap * ($cols - 1))
+            if ($contentW -lt $cols) { $contentW = $cols; $gap = 0 }
+            $colW = [int][math]::Floor($contentW / $cols)
             $visible = $hi * $cols
             for ($r = 0; $r -lt $hi; $r++) {
                 $plainLen = 0
@@ -690,6 +693,10 @@ function Render-CorePanel($metric, [int]$w, [int]$h, [string]$detail, $cores) {
                         [void]$row.Append(' ' * $cw)
                     }
                     $plainLen += $cw
+                    if ($gap -gt 0 -and $c -lt ($cols - 1)) {
+                        [void]$row.Append(' ' * $gap)
+                        $plainLen += $gap
+                    }
                 }
                 $lines.Add("$dim$vb$(Ramp-Fg $metric.Ramp ([double]($r + 1) / [math]::Max(1, $hi)))$($row.ToString())$RESET$dim$vb$RESET")
             }
@@ -858,8 +865,6 @@ if ($SelfTest) {
             [pscustomobject]@{ Label='C6';  Value=84.0 }, [pscustomobject]@{ Label='C7';  Value=96.0 }
             [pscustomobject]@{ Label='C8';  Value=20.0 }, [pscustomobject]@{ Label='C9';  Value=40.0 }
             [pscustomobject]@{ Label='C10'; Value=60.0 }, [pscustomobject]@{ Label='C11'; Value=80.0 }
-            [pscustomobject]@{ Label='C12'; Value=18.0 }, [pscustomobject]@{ Label='C13'; Value=38.0 }
-            [pscustomobject]@{ Label='C14'; Value=58.0 }, [pscustomobject]@{ Label='C15'; Value=78.0 }
         )
     }
     Ensure-CpuCoreHistory $fake.CpuCores
