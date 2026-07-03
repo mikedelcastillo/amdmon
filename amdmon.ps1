@@ -24,12 +24,41 @@ param(
     [switch]$NoTemp,
     [switch]$EnsureDeps,
     [switch]$SelfTest,
+    [switch]$NoElevate,
     [int]$TestW = 100,
     [int]$TestH = 30
 )
 
 $ErrorActionPreference = 'Stop'
 $LibDir = Join-Path $PSScriptRoot 'lib'
+
+# ----------------------------------------------------------------------------
+# Elevation: CPU/GPU temperatures load a signed Ring0 kernel driver that only
+# loads when elevated. Try to relaunch as Administrator (UAC prompt) up front.
+# If the user accepts, the elevated instance takes over and this one exits; if
+# they decline (or it fails), we just continue unprivileged - temps show n/a but
+# usage/network still work. -NoElevate stops the relaunched instance from asking
+# again. Skip for non-interactive modes where popping a fresh admin window would
+# be unhelpful (-Once/-EnsureDeps/-SelfTest print to the current console) and
+# when -NoTemp opts out of the driver entirely.
+$script:IsElevated = $false
+try {
+    $script:IsElevated = ([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+} catch { }
+
+if (-not $script:IsElevated -and -not $NoElevate -and -not $NoTemp -and -not $Once -and -not $EnsureDeps -and -not $SelfTest) {
+    try {
+        $psExe = try { (Get-Process -Id $PID).Path } catch { $null }
+        if (-not $psExe) { $psExe = 'powershell.exe' }
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-NoElevate')
+        if ($Interval -ne 0.1) { $argList += @('-Interval', $Interval) }
+        Start-Process -FilePath $psExe -Verb RunAs -ArgumentList $argList -ErrorAction Stop
+        return   # elevated instance launched; hand off to it
+    } catch {
+        # User dismissed UAC or elevation is unavailable - proceed unprivileged.
+        Write-Host "amdmon: continuing without Administrator (CPU temp will show n/a)." -ForegroundColor DarkGray
+    }
+}
 
 # ----------------------------------------------------------------------------
 # Dependency management: fetch LibreHardwareMonitorLib + deps from NuGet.
@@ -127,7 +156,7 @@ function Initialize-Lhm {
 
         $script:Computer = $c
         $script:CpuHw = $c.Hardware | Where-Object { "$($_.HardwareType)" -eq 'Cpu' } | Select-Object -First 1
-        $script:GpuHw = $c.Hardware | Where-Object { "$($_.HardwareType)" -like 'Gpu*' } | Select-Object -First 1
+        $script:GpuHw = Select-BestGpu $c.Hardware
 
         $script:S.CpuLoad  = Find-Sensor $script:CpuHw 'Load'      @('CPU Total')
         $script:S.CpuCoreLoads = Find-CpuCoreLoadSensors $script:CpuHw
@@ -141,6 +170,41 @@ function Initialize-Lhm {
         Write-Host "amdmon: LibreHardwareMonitor unavailable ($($_.Exception.Message)); using counters." -ForegroundColor Yellow
         return $false
     }
+}
+
+# Pick the GPU to monitor, preferring a dedicated/discrete adapter and only
+# falling back to an integrated one (Intel HD/UHD/Iris, an AMD APU's "Radeon
+# Graphics") when there is nothing discrete. NVIDIA parts are effectively always
+# discrete and Intel graphics effectively always integrated; AMD can be either,
+# so the name decides. Discrete product families (RTX/GTX/Radeon RX/Arc/...) get
+# a boost, and ties break toward the card reporting the most dedicated VRAM.
+function Select-BestGpu($hardware) {
+    $gpus = @($hardware | Where-Object { "$($_.HardwareType)" -like 'Gpu*' })
+    if ($gpus.Count -le 1) { return ($gpus | Select-Object -First 1) }
+    $scored = foreach ($g in $gpus) {
+        $type = "$($g.HardwareType)"
+        $name = "$($g.Name)"
+        $score = switch ($type) {
+            'GpuNvidia' { 300 }   # discrete
+            'GpuAmd'    { 200 }   # discrete unless the name says otherwise
+            'GpuIntel'  { 50 }    # integrated (except Arc, boosted below)
+            default     { 100 }
+        }
+        # Names that mark an integrated part regardless of vendor.
+        if ($name -match 'Integrated|iGPU|UHD|Iris|HD Graphics|Radeon\(TM\) Graphics|Radeon Graphics|Vega.*Graphics') {
+            $score = [math]::Min($score, 60)
+        }
+        # Discrete product families outrank any integrated part (Intel Arc too).
+        if ($name -match 'RTX|GTX|Radeon RX|Radeon Pro|Quadro|\bArc\b') {
+            $score += 100
+        }
+        # Dedicated VRAM total is a strong discreteness signal; use it to break ties.
+        $vram = 0.0
+        $memT = $g.Sensors | Where-Object { "$($_.SensorType)" -eq 'SmallData' -and $_.Name -match 'Memory Total' } | Select-Object -First 1
+        if ($memT -and $null -ne $memT.Value) { $vram = [double]$memT.Value }
+        [pscustomobject]@{ Gpu = $g; Score = $score; Vram = $vram }
+    }
+    return (@($scored) | Sort-Object -Property Score, Vram -Descending | Select-Object -First 1).Gpu
 }
 
 function Find-Sensor($hw, [string]$type, [string[]]$names) {
@@ -173,6 +237,13 @@ function Get-SensorValue($s) {
 
 $haveLhm = Initialize-Lhm
 
+# Reading CPU temperature (AMD Tctl/Tdie, Intel package) needs the Ring0 kernel
+# driver, which LibreHardwareMonitor can only load when elevated. GPU temps come
+# from the graphics driver and work unprivileged, so without admin you get a GPU
+# temp but the CPU sensor reads a bogus 0. $script:IsElevated was determined up
+# front (see the elevation block near the top) so the panel can show an honest
+# "n/a" plus a hint instead of a misleading 0 deg C.
+
 # Total VRAM via the driver's 64-bit registry value (WMI AdapterRAM overflows >4GB).
 function Get-TotalVramBytes {
     $best = 0
@@ -191,8 +262,17 @@ if (-not $cpuName) { $cpuName = 'CPU' }
 $gpuName = $null
 if ($script:GpuHw) { $gpuName = $script:GpuHw.Name }
 if (-not $gpuName) {
-    $gpuName = try { (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-        Where-Object { $_.AdapterRAM -gt 0 } | Sort-Object AdapterRAM -Descending | Select-Object -First 1).Name } catch { 'GPU' }
+    # No LHM GPU: pick from WMI, preferring a discrete adapter. Rank integrated
+    # names last, then by AdapterRAM (biggest first). AdapterRAM overflows above
+    # 4 GB (unsigned 32-bit), so it only coarsely ranks cards - hence the name
+    # heuristic leads and VRAM is just the tiebreak.
+    $gpuName = try {
+        (Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name } | Sort-Object -Property @{
+                Expression = { if ("$($_.Name)" -match 'Integrated|iGPU|UHD|Iris|HD Graphics|Radeon\(TM\) Graphics|Radeon Graphics|Vega.*Graphics') { 1 } else { 0 } }
+            }, @{ Expression = { [int64]($_.AdapterRAM) }; Descending = $true } |
+            Select-Object -First 1).Name
+    } catch { 'GPU' }
 }
 if (-not $gpuName) { $gpuName = 'GPU' }
 
@@ -275,6 +355,11 @@ if (-not $netName) { $netName = 'Network' }
 $cpuTempLabel = if ($script:S.CpuTemp) { $script:S.CpuTemp.Name } else { 'Temperature' }
 $gpuTempLabel = if ($script:S.GpuTemp) { $script:S.GpuTemp.Name } else { 'Temperature' }
 
+# LHM loaded but unelevated: CPU temp won't read. Replace the panel detail with an
+# actionable hint (the value already shows n/a) so the dashboard explains itself.
+$cpuTempNeedsAdmin = ($haveLhm -and -not $script:IsElevated -and -not $NoTemp)
+if ($cpuTempNeedsAdmin) { $cpuTempLabel = 'run as admin for temp' }
+
 # ----------------------------------------------------------------------------
 # Sampling: returns one frame of numbers.
 # ----------------------------------------------------------------------------
@@ -291,6 +376,10 @@ function Get-Frame {
             $cpuCores += [pscustomobject]@{ Label = ($s.Name -replace '^CPU\s+', ''); Value = (Get-SensorValue $s) }
         }
         $cpuT = Get-SensorValue $script:S.CpuTemp
+        # A running CPU is never at 0 deg C: LHM returns 0 for Tctl/Tdie when the
+        # Ring0 driver can't be loaded (no admin). Treat that sentinel as no reading
+        # so the panel shows "n/a" rather than a misleading 0 deg C and a dead graph.
+        if ($null -ne $cpuT -and $cpuT -le 0) { $cpuT = $null }
         $gpu  = Get-SensorValue $script:S.GpuLoad
         $gpuT = Get-SensorValue $script:S.GpuTemp
         $u = Get-SensorValue $script:S.GpuMemU   # MB
@@ -357,6 +446,11 @@ function Format-Rate($bps) {
     if ($bps -lt 1MB)   { return ('{0:N1} KB/s' -f ($bps / 1KB)) }
     if ($bps -lt 1GB)   { return ('{0:N1} MB/s' -f ($bps / 1MB)) }
     return ('{0:N2} GB/s' -f ($bps / 1GB))
+}
+
+if ($cpuTempNeedsAdmin) {
+    Write-Host "amdmon: CPU temperature needs Administrator (loads a kernel driver); showing n/a." -ForegroundColor Yellow
+    Write-Host "        Re-run elevated for CPU temps, e.g.  Start-Process powershell -Verb RunAs -ArgumentList '-File ""$PSCommandPath""'" -ForegroundColor DarkGray
 }
 
 if ($Once) {
